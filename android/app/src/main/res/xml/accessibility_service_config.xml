@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  保活用的无障碍服务配置，思路对齐李跳跳：
+  - 事件类型给全掩码，但 canRetrieveWindowContent=false，不读任何界面内容，
+    这样系统只把事件通知过来，不做窗口内容抓取，耗电和隐私风险都最低。
+  - isAccessibilityTool=true 必须保留：否则部分系统会把它当"非无障碍工具"限流甚至杀掉。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="false"
+    android:description="@string/accessibility_desc"
+    android:notificationTimeout="100"
+    android:isAccessibilityTool="true" />

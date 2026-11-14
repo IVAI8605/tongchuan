@@ -1,0 +1,22 @@
+# 构建配置模板。复制为 .cargo/config.toml 后按本机情况改，实际文件不入库（见 .gitignore）。
+#
+# 为什么需要这份配置：
+# 1. Windows 上 ring 用 ar 打包静态库，而 mingw 的 ar 处理不了中文路径；仓库目录名是中文，
+#    所以构建产物要落到项目之外的纯 ASCII 目录。
+# 2. Rust 的 panic 位置会把源码绝对路径写进 .rodata，只 strip 符号删不掉，
+#    公开分发前需要用路径重映射把这些前缀替换成中性字符串。
+#
+# 这里不写任何机器绝对路径：产物默认放到项目上一级的 tongchuan-target，
+# 换盘符或换机器都能用（前提是上一级目录本身是纯 ASCII）。
+# 脚本（verify.ps1、android/*.ps1、windows/make-installer.ps1）优先用 CARGO_TARGET_DIR，
+# 未设置时按同一相对位置解析，四处读到的是同一个目录。
+# Android 交叉编译的 linker/ar 不写在这里，由 scripts/android/build-android.ps1
+# 通过环境变量注入，避免把 NDK 的绝对路径固化进仓库。
+[build]
+target-dir = "../tongchuan-target"
+
+# 把本机源码前缀替换成中性字符串。把 <你的构建机用户目录> 换成实际值，例如 Windows 的用户目录
+# 或 Linux 的 /home/<用户名>。命中不存在的规则不会报错，可以保留多条。
+rustflags = [
+    '--remap-path-prefix=<你的构建机用户目录>=cargo',
+]

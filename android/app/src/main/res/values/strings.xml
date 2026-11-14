@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">局域网通传</string>
+    <string name="accessibility_desc">仅用于提高后台存活概率，不读取屏幕内容、不代替你操作任何应用。不开启也能正常接收，只是后台存活时间可能更短。</string>
+</resources>

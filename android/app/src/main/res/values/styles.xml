@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 页面自己画标题（「通传 x.y.z」），不需要系统标题栏；
+         去掉后顺带规避 targetSdk 35 强制边到边时内容被状态栏/标题栏压住的问题 -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>

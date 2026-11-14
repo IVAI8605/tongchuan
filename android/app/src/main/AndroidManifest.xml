@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- connectedDevice 类型前台服务的硬性前提之一，缺了会被系统拒绝启动 -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- 局域网发现靠 UDP 组播，没有这条权限收不到别人的广播 -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14 起前台服务必须声明类型；选 connectedDevice 而不是 dataSync，
+         因为 dataSync 在 Android 15 有「24 小时内累计 6 小时」的硬上限，会被系统掐断 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 只是为了让用户一键进白名单，不涉及权限降级；不申请也能用，只是耗电策略更激进 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 自用侧载，不走上架审核：拿到「所有文件访问」后就能按真实路径写用户选的目录，
+         既不用把文件塞进相册，也不用为了一个落点去写整套 SAF fd 适配 -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- v0.7 分享菜单：相册/文件管理器「分享到通传」直接把内容带进来，省掉先进应用再找文件。
+                 singleTop + onNewIntent 是为了应用已在后台时复用同一个界面，不叠第二个 Activity -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".ReceiverService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- 发送前台服务：与接收同用 connectedDevice 类型（dataSync 在 Android 15 有 6 小时累计上限） -->
+        <service
+            android:name=".SendService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <service
+            android:name=".KeepAliveService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- v0.8 剪贴板同步：常驻前台服务，只做「从对端拉 + 写剪贴板」 -->
+        <service
+            android:name=".ClipService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- v0.8 快捷设置磁贴：点一下把界面带到前台再读剪贴板推送（后台读会被系统拦） -->
+        <service
+            android:name=".ClipTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_launcher"
+            android:label="推送剪贴板"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 只读、仅授权给当前打开文件的接收方，作用就是把「接收目录里的文件」交给系统去打开 -->
+        <provider
+            android:name=".FileServeProvider"
+            android:authorities="${applicationId}.filesrv"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+</manifest>

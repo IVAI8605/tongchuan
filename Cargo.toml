@@ -1,0 +1,24 @@
+# 版本号唯一来源：所有子 crate 与 CLI 都通过 workspace.package.version 读取。
+[workspace]
+members = ["crates/tc-core", "crates/tc-jni"]
+resolver = "2"
+
+[workspace.package]
+version = "0.13.1"
+edition = "2021"
+
+[package]
+name = "tongchuan"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tc"
+path = "src/main.rs"
+
+[dependencies]
+tc-core = { path = "crates/tc-core" }
+
+# 公开发布的二进制不留符号与调试信息；构建路径的去标识化在 .cargo/config.toml 的 rustflags 里。
+[profile.release]
+strip = true

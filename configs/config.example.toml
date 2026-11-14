@@ -1,0 +1,33 @@
+# 通传守护进程示例配置。复制成项目根的 config.toml 后按实际目录修改：CLI 默认在当前目录查找 config.toml。
+# 注意：不要给本文件加 UTF-8 BOM，否则 TOML 解析会失败。
+
+alias = "我的电脑"
+listen = "0.0.0.0:53318"
+manage = "0.0.0.0:53319"
+
+# 落点必须在 allow 列表内，否则守护进程拒绝启动（防止 NAS 变成任意写盘入口）
+destination = "D:/通传/收到"
+allow = ["D:/通传/收到"]
+
+identity_dir = "D:/通传/identity"
+log_dir = "D:/通传/logs"
+queue_dir = "D:/通传/queue"
+log_days = 2
+# 日志级别：error | warn | info（默认） | debug。
+# 排障时不必改这里，设环境变量 TC_LOG_LEVEL=debug 再重启进程即可；写错会按 info 运行并留一条 warn
+log_level = "info"
+# 单个日志文件大小上限（字节），超过就改名归档为 daemon_<YYYYMMDD-HHmm>.log 并另起一份；0 = 不轮转。
+# 归档文件只改名不删除，清理需人工列清单确认
+log_max_bytes = 4194304
+
+# 首次配对用；两端填一样。留空表示不校验配对码（仅限已配对设备）
+pair_code = "123456"
+auto_accept = true
+
+# 信任策略：closed（默认，只放行信任表内的设备）| open（排障/老设备过渡，切换会记 warn 日志）
+# 信任表是 identity_dir/trust.jsonl，用 tc trust 命令或管理页维护
+trust_mode = "closed"
+
+# 剪贴板中继（v0.6）。留空=不启动；剪贴板里可能有密码，默认关闭。
+# 开启后 `tc clip push|watch|status` 连这个端口，历史落在 identity_dir/clip-history.jsonl
+# clip_listen = "0.0.0.0:53320"

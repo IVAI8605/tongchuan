@@ -1,0 +1,25 @@
+# 通传守护进程的 systemd 模板，按实际用户与卷路径改。
+# 部署前必须做的两件事：
+# 1. 把 User/Group 改成实际的普通用户（不要 root），并按白名单调整 ReadWritePaths
+# 2. 若数据卷是单独挂载，在 After= 里加上对应的 .mount 单元，避免卷没挂上就开始接收
+[Unit]
+Description=Tongchuan LAN folder transfer daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tongchuan
+Group=tongchuan
+WorkingDirectory=/opt/tongchuan
+ExecStart=/opt/tongchuan/tc daemon --config /etc/tongchuan/config.toml
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# 只允许写配置里 allow 列出的目录，按实际卷路径改
+ReadWritePaths=/etc/tongchuan /opt/tongchuan
+
+[Install]
+WantedBy=multi-user.target

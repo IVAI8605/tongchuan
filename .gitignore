@@ -1,0 +1,52 @@
+# 通传 · 版本控制排除清单
+# 判断标准：可重新构建或可运行时再生的东西不进仓库；源码、脚本、配置模板、文档一律保留。
+
+# ===== Rust 构建产物 =====
+# 正常按 .cargo/config.toml 的 target-dir 落到仓库上一级的 tongchuan-target（仓库外）；
+# 换机器或去掉该配置后会落回仓库内，两种路径都要挡住。
+/target/
+tongchuan-target/
+*.pdb
+
+# ===== 运行时数据（私钥/证书/日志/队列/已收文件，全部可运行期再生）=====
+# data/identity/identity.key 是设备私钥，绝不能入库
+/data/
+
+# ===== 本机实例配置 =====
+# config.toml 含本机绝对路径与端口；CLI 默认在当前目录查找它，故按项目例外留在项目根
+# 模板在 configs\config.example.toml（必须入库，configs\ 不得被忽略）
+/config.toml
+
+# ===== 本机构建配置 =====
+# .cargo/config.toml 含构建机路径前缀，只入库模板 .cargo/config.example.toml
+/.cargo/config.toml
+
+# ===== 临时目录 =====
+# 2026-11-13 重构：原 .tmp\ 按规范第 2 节等价目录统一为默认名 cache\
+# verify.ps1 与 cargo test 的产物落在 cache\通传-验证\（含测试用身份密钥、日志、回环样本），可随时重跑
+/cache/
+*.log
+
+# ===== 客户端工作副本 =====
+# Trae 的截图暂存与 HTML 分享包，不是项目内容，工具可随时重建
+/.screenshots/
+/.trae-html-share-packages/
+
+# ===== Android / Gradle =====
+/android/.gradle/
+/android/build/
+/android/app/build/
+# 含本机 SDK 绝对路径，由 Android Studio 或手工生成，不入库
+/android/local.properties
+# 由 scripts/android/build-android.ps1 从 Rust 产物拷入，不是手写源码
+/android/app/src/main/jniLibs/**/*.so
+*.apk
+*.aab
+
+# ===== 桌面端可执行产物 =====
+/tc.exe
+/通传-*-setup.exe
+
+# ===== 项目状态卡 =====
+# 本地工作状态，2026-11-13 起放项目根且不入库；只忽略根上这一份，docs\ 内同名文件不受影响
+/项目状态卡.md

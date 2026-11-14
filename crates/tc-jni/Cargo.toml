@@ -1,0 +1,15 @@
+[package]
+name = "tc-jni"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "tc_jni"
+# cdylib 给 Android 侧 System.loadLibrary 用；rlib 让桌面端也能直接复用并做单元测试
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tc-core = { path = "../tc-core" }
+serde_json = "1"
+# 只做 JNI 签名与字符串转换，不需要 JVM 就能编译；核心逻辑走纯 Rust API
+jni = "0.21"
