@@ -1838,11 +1838,19 @@ fn handle_session(
                     )
                 }));
             }
-            // 收尾在主线程做：等所有流把各自的缺口收完
+            // 收尾在主线程做：等所有流把各自的缺口收完。
+            // 一旦某条流报错就立刻置 abort，其余流在处理完当前块后退出，不再白跑剩下的块。
             for h in handles {
                 match h.join() {
-                    Ok(r) => stats.push(r),
-                    Err(_) => stats.push(Err(io_err("数据流线程异常退出"))),
+                    Ok(Ok(st)) => stats.push(Ok(st)),
+                    Ok(Err(e)) => {
+                        abort_ref.store(true, Ordering::Relaxed);
+                        stats.push(Err(e));
+                    }
+                    Err(_) => {
+                        abort_ref.store(true, Ordering::Relaxed);
+                        stats.push(Err(io_err("数据流线程异常退出")));
+                    }
                 }
             }
         });
