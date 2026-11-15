@@ -33,6 +33,8 @@ Section "主程序"
   File "${TC_BUILD}"
   SetOutPath "$INSTDIR\scripts"
   File /r "..\windows\*.ps1"
+  ; v0.20：零窗口启动包装器（wscript 调它，避免 powershell 自己闪控制台）
+  File /r "..\windows\*.vbs"
   SetOutPath "$INSTDIR"
   ; 配置模板 2026-11-13 起在项目根 configs\ 下（规范 S8），安装副本仍落在 $INSTDIR 根
   File "..\..\configs\config.example.toml"
@@ -49,7 +51,7 @@ Section "主程序"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Tongchuan" "DisplayVersion" "${VERSION}"
   ; 装完直接把托盘拉起来，用户马上能看到图标（用 Exec 不等待，否则安装器会一直等托盘退出）
   DetailPrint "正在启动托盘…"
-  Exec 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$INSTDIR\scripts\tray.ps1" -TcPath "$INSTDIR\tc.exe"'
+  Exec 'wscript.exe //B //Nologo "$INSTDIR\scripts\start-hidden.vbs"'
 SectionEnd
 
 Section "Uninstall"
@@ -59,5 +61,6 @@ Section "Uninstall"
   Delete "$INSTDIR\tc.exe"
   Delete "$INSTDIR\config.example.toml"
   Delete "$INSTDIR\tongchuan.ico"
+  Delete "$INSTDIR\scripts\start-hidden.vbs"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Tongchuan"
 SectionEnd

@@ -45,11 +45,15 @@ foreach ($r in @(
     New-Item -Path (Join-Path $r 'command') -Force -Value $resendCmd | Out-Null
 }
 
-# 登录时隐藏启动托盘（托盘再拉起 daemon），不抢前台、不占用鼠标键盘
+# 登录时零窗口启动托盘（托盘再拉起 daemon），不抢前台、不占用鼠标键盘。
+# 必须走 wscript + start-hidden.vbs：powershell.exe 是控制台程序，即便带 -WindowStyle Hidden
+# 也会先建控制台窗口再隐藏，登录/更新时会闪一下黑框（2026-11-15 实测）。
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$cmd = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -TcPath "{1}"' -f $tray, $TcPath
+$hidden = Join-Path $PSScriptRoot 'start-hidden.vbs'
+$wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+$cmd = '"{0}" //B //Nologo "{1}"' -f $wscript, $hidden
 Set-ItemProperty -Path $runKey -Name 'Tongchuan' -Value $cmd -Force
-Write-Output "OK 右键子菜单 + 登录启动已写入 HKCU"
+Write-Output "OK 右键子菜单 + 登录启动已写入 HKCU（隐藏窗口）"
 
 # 首次安装生成配置文件。安装目录里只有模板 config.example.toml，
 # 缺 config.toml 时托盘与 daemon 都起不来（2026-11-13 实测：登录自启的托盘因缺配置直接退出，

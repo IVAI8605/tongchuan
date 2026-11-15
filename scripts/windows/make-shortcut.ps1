@@ -23,20 +23,25 @@ foreach ($p in @($TcPath, $Config, $tray)) {
     if (-not (Test-Path $p)) { throw "缺少必需文件：$p" }
 }
 
-# 用系统自带的 Windows PowerShell 5.1：目标机器上一定有，不依赖 pwsh 7
-# v0.13.3：快捷方式带 -OpenUi，双击后除了保证后台在跑，还会直接把管理页拉到浏览器
-$ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$psArgs = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -TcPath "{1}" -Config "{2}" -OpenUi' -f $tray, $TcPath, $Config
+# 入口改用 wscript + start-hidden.vbs：powershell.exe 是控制台程序，即使带 -WindowStyle Hidden
+# 也会先建控制台窗口再隐藏，双击时能看到一闪（2026-11-15 实测）。vbs 用 Run(..., 0, False)
+# 让窗口从创建起就是隐藏的，全程零可见窗口。
+$vbs = Join-Path $AppDir 'scripts\windows\start-hidden.vbs'
+if (-not (Test-Path $vbs)) { $vbs = Join-Path $AppDir 'scripts\start-hidden.vbs' }
+if (-not (Test-Path $vbs)) { throw "缺少必需文件：$vbs" }
+$wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+# -OpenUi：双击后除了保证后台在跑，还把管理页拉到浏览器（由 vbs 透传给 tray.ps1）
+$psArgs = '//B //Nologo "{0}" -OpenUi' -f $vbs
 
 function New-Lnk([string]$path) {
     $shell = New-Object -ComObject WScript.Shell
     $lnk = $shell.CreateShortcut($path)
-    $lnk.TargetPath = $ps
+    $lnk.TargetPath = $wscript
     $lnk.Arguments = $psArgs
     $lnk.WorkingDirectory = $AppDir
     if (Test-Path $ico) { $lnk.IconLocation = "$ico,0" }
     $lnk.Description = '通传 · 局域网文件夹互传（后台接收 + 托盘）'
-    # 7 = 最小化：配合 -WindowStyle Hidden，双击时不会闪一下完整控制台
+    # 7 = 最小化：wscript 本身没有窗口，这一项只是兜底
     $lnk.WindowStyle = 7
     $lnk.Save()
     Write-Output "OK shortcut $path"

@@ -17,6 +17,13 @@
 - 三端各自的当前版本与协议兼容范围，维护在 `项目状态卡.md` 的「三端版本支持表」；升版时只改那一处，不再散落在各处说明里。
 - 发版产物默认只留本地（`_外置\备份\release-v<版本>-资产临时\`），**用户点名才上传**。
 
+### Windows 常驻启动（零可见窗口）
+
+- 一律走 `wscript.exe //B //Nologo scripts\start-hidden.vbs`（登录 Run 键、桌面/开始菜单快捷方式、安装器装完启动都用它）。
+- 不要再用 `powershell.exe -WindowStyle Hidden` 直接拉托盘：powershell 是控制台程序，会先建控制台窗口再隐藏，屏幕上仍闪一下（2026-11-15 实测，计划任务里也能看到 `DAEMON_PID ...` 闪过）。
+- `start-hidden.vbs` 用 `WshShell.Run cmd, 0, False`，窗口从创建起就是隐藏的；文件以 UTF-16LE 带 BOM 保存（VBScript 按 ANSI 读会弄乱中文路径）。
+- 自动化会话里必须常驻时（会话结束会回收子进程），用一次性计划任务执行上面这条 wscript 命令，跑完把任务删掉。
+
 ### Linux 包构建
 
 - 一律在 Linux 服务器本机原生编译，不做 Windows 交叉编译（本机没有 zig / musl-gcc / cargo-zigbuild，交叉编译也从未验证过）。
