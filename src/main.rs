@@ -17,7 +17,8 @@ use tc_core::transport::{Opener, PlainAccepter, PlainOpener, TlsAccepter, TlsOpe
 use tc_core::trust::{self, TrustStore};
 use tc_core::web;
 use tc_core::{
-    run_receiver_with, run_receiver_with_gate, HubReport, ReceiverHub, TrustGate, TrustMode,
+    run_receiver_with_gate_streams, run_receiver_with_streams, HubReport, ReceiverHub, TrustGate,
+    TrustMode,
 };
 
 fn main() {
@@ -217,13 +218,15 @@ fn send_identity(args: &[String]) -> io::Result<(PathBuf, Identity)> {
 fn print_send(r: &tc_core::SendReport) {
     // dest=：接收端回报的落点根目录名（v0.11），命令行也能看出「传到哪个文件夹」
     // packs=：v0.14 收到的批量请求数，0 表示走的是逐块兼容路径
+    // streams=：v0.15 实际开了几条数据连接，1 表示单流
     println!(
-        "SEND txn={} files={} bytes={} blocks={} packs={} skipped={} dest={} verdict={}",
+        "SEND txn={} files={} bytes={} blocks={} packs={} streams={} skipped={} dest={} verdict={}",
         r.txn_id,
         r.files,
         r.bytes,
         r.blocks_sent,
         r.packs,
+        r.streams,
         r.files_skipped,
         if r.dest_dirs.is_empty() {
             "-".to_string()
@@ -236,12 +239,13 @@ fn print_send(r: &tc_core::SendReport) {
 
 fn print_recv(r: &tc_core::ReceiverReport) {
     println!(
-        "RECV txn={} files={} bytes={} written={} resumed={} verified={} interrupted={} skipped={}",
+        "RECV txn={} files={} bytes={} written={} resumed={} streams={} verified={} interrupted={} skipped={}",
         r.txn_id,
         r.files,
         r.bytes,
         r.blocks_written,
         r.resumed_blocks,
+        r.streams_used,
         r.verified,
         r.interrupted,
         r.skipped_files
@@ -614,6 +618,10 @@ fn run(args: &[String]) -> io::Result<()> {
             let max = env::var("TC_MAX_BLOCKS")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok());
+            // v0.15：并行流数。默认 4；测速对比时可 --streams 1 退回单流
+            let streams = opt(args, "--streams")
+                .and_then(|s| s.parse::<u8>().ok())
+                .unwrap_or(tc_core::DEFAULT_STREAMS);
             let listener = TcpListener::bind(&listen)?;
             let port = listener.local_addr()?.port();
 
@@ -660,24 +668,26 @@ fn run(args: &[String]) -> io::Result<()> {
                         mode,
                         pair_code.clone(),
                     );
-                    run_receiver_with_gate(
+                    run_receiver_with_gate_streams(
                         &acc,
                         Path::new(&dest),
                         max,
                         None,
                         &root_map,
                         Some(&gate),
+                        streams,
                     )?
                 }
                 None => {
                     let acc = PlainAccepter { listener };
                     // 明文是排障入口，没有证书可判定；配对码仍按旧语义生效
-                    run_receiver_with(
+                    run_receiver_with_streams(
                         &acc,
                         Path::new(&dest),
                         max,
                         pair_code.as_deref(),
                         &root_map,
+                        streams,
                     )?
                 }
             };
@@ -877,7 +887,9 @@ fn run(args: &[String]) -> io::Result<()> {
                     cfg.max_sessions,
                 )
                 // 与 CLI / 管理页共用同一个 TrustStore 实例，撤销后下一场会话立即生效
-                .with_gate(gate),
+                .with_gate(gate)
+                // v0.15：并行流数来自配置，1 = 关闭
+                .with_streams(cfg.streams as u8),
             );
             let st = state.clone();
             let on_report: Arc<dyn Fn(HubReport) + Send + Sync> = Arc::new(move |report| {
@@ -1044,7 +1056,7 @@ fn run(args: &[String]) -> io::Result<()> {
             println!("  tc history [--dir DIR] [--limit N]");
             println!("  tc resend [--id ID|last] [--history-dir DIR] [--pair-code CODE] [--identity DIR] [--retry] [--force]");
             println!("  tc diag [--config FILE] [--identity DIR] [--out DIR] [--log FILE] [--history-dir DIR]");
-            println!("  tc recv --listen IP:PORT --dest PATH [--identity DIR] [--pair-code CODE] [--trust-mode closed|open] [--root-map r0=NAME] [--announce]");
+            println!("  tc recv --listen IP:PORT --dest PATH [--identity DIR] [--pair-code CODE] [--trust-mode closed|open] [--root-map r0=NAME] [--streams N] [--announce]");
             println!("  tc daemon --config FILE");
             println!("  tc discover [--timeout SEC] [--identity DIR]");
             println!("  tc queue --dir DIR [--window MIN]");

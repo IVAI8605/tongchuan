@@ -13,7 +13,7 @@ use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -73,6 +73,32 @@ const PACK_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// v0.14：本次支持的能力。只有双方都声明才启用 pack（一次请求多块）。
 const CAP_PACK: &str = "pack";
+
+/// v0.15：双方都声明才启用多数据流。
+const CAP_STREAMS: &str = "streams";
+
+/// 默认并行流数。接收端按配置与工作量收敛后写进 MANIFEST_ACK。
+pub const DEFAULT_STREAMS: u8 = 4;
+
+/// 并行流上限：再多只增加线程与内存（每流 8 MiB 缓冲），链路先到瓶颈。
+const MAX_STREAMS: u8 = 8;
+
+/// 实际开几条数据连接：对端不支持、或本次块太少时退回单流。
+/// 模拟中断（max_blocks）必须单流，否则多发出的请求会让续传语义对不上。
+fn effective_streams(
+    requested: u8,
+    peer_caps: &[String],
+    blocks: u64,
+    max_blocks: Option<usize>,
+) -> u8 {
+    if max_blocks.is_some() || !peer_caps.iter().any(|c| c == CAP_STREAMS) {
+        return 1;
+    }
+    let want = requested.clamp(1, MAX_STREAMS) as u64;
+    // 8 块以下的传输，开连接的握手成本比并行省下的时间还多
+    let by_work = if blocks >= 8 { want } else { 1 };
+    by_work.min(blocks.max(1)) as u8
+}
 
 /// 块大小不一致的提示。只报「校验失败」用户查不出原因，必须点明两边数值与动作。
 pub fn block_size_reject_reason(peer: u32) -> String {
@@ -246,6 +272,10 @@ pub enum Control {
     DataHello {
         #[serde(rename = "txnId")]
         txn_id: String,
+        /// v0.15：这条数据连接在本会话里的序号（从 0 起）。
+        /// 只用于日志与排障；投递仍按 txnId + 到达顺序，旧端没有这个键也不影响。
+        #[serde(default)]
+        stream: u8,
     },
     /// 明确拒绝：并发已满、落点冲突、会话不存在。让对方立刻拿到原因，
     /// 而不是一直等 ACK 直到连接超时（旧实现里的「挂住」就是这么来的）。
@@ -267,6 +297,10 @@ pub enum Control {
         skipped_roots: Vec<String>,
         #[serde(rename = "acceptedFileIds")]
         accepted_file_ids: Vec<String>,
+        /// v0.15：接收端要求发送端开几条数据连接。0/1 = 单流。
+        /// 旧发送端不认识这个键会忽略，继续只开 1 条，行为不变。
+        #[serde(default)]
+        streams: u8,
     },
     Probe {
         #[serde(rename = "txnId")]
@@ -305,6 +339,8 @@ pub struct SendReport {
     /// v0.14：本次收到的 PACK_REQ 包数。为 0 说明走的是逐块兼容路径，
     /// 用来在测试与排障时确认「pack 到底有没有生效」。
     pub packs: u64,
+    /// v0.15：本次实际开了几条数据连接。1 表示单流（旧接收端或配置关闭）。
+    pub streams: u8,
     /// 接收端按「同路径同内容」跳过的文件数（增量同步）。日志里要能看出省了多少。
     pub files_skipped: u64,
     /// 接收端回报的落点根目录名（v0.11）。界面用它显示「传到了哪个文件夹」。
@@ -319,6 +355,8 @@ pub struct ReceiverReport {
     pub bytes: u64,
     pub blocks_written: u64,
     pub resumed_blocks: u64,
+    /// v0.15：本场会话实际使用的数据连接数，1 = 单流。
+    pub streams_used: u8,
     pub verified: bool,
     pub interrupted: bool,
     /// 来源设备（HELLO 里带的）。历史记录要能看出「谁发来的」，不再只有一句 txnId。
@@ -750,7 +788,7 @@ pub fn run_sender_with_device_control_opts(
             pair_code: pair_code.map(|s| s.to_string()),
             version: PROTOCOL_VERSION.into(),
             block_size: BLOCK_SIZE as u32,
-            caps: vec![CAP_PACK.to_string()],
+            caps: vec![CAP_PACK.to_string(), CAP_STREAMS.to_string()],
         },
     )?;
     match read_message::<_, Control>(&mut ctrl)? {
@@ -779,10 +817,12 @@ pub fn run_sender_with_device_control_opts(
             force: options.force,
         },
     )?;
-    let accepted_ids: HashSet<String> = match read_message::<_, Control>(&mut ctrl)? {
+    let (accepted_ids, streams): (HashSet<String>, u8) = match read_message::<_, Control>(&mut ctrl)? {
         Control::ManifestAck {
-            accepted_file_ids, ..
-        } => accepted_file_ids.into_iter().collect(),
+            accepted_file_ids,
+            streams,
+            ..
+        } => (accepted_file_ids.into_iter().collect(), streams),
         Control::Busy { reason } => return Err(io_err(format!("receiver rejected manifest: {reason}"))),
         other => return Err(io_err(format!("unexpected manifest reply: {other:?}"))),
     };
@@ -791,160 +831,90 @@ pub fn run_sender_with_device_control_opts(
     let files_skipped = manifest.total_files.saturating_sub(accepted_ids.len() as u64);
 
     let source_map = build_source_map(paths, &manifest)?;
-    let mut data = opener.open()?;
-    // 数据连接先自报 txnId：并发接多台设备时靠它找回自己的会话。
-    // 这一步必须在新连接上先发，接收端才不用按 accept 顺序猜连接归属。
-    write_message(
-        &mut data,
-        &Control::DataHello {
-            txn_id: manifest.txn_id.clone(),
-        },
-    )?;
-    // 缓存最近用过的文件句柄：一个大文件上千块不用重复 open；
-    // 容量固定，切到别的文件时关掉最久未用的，避免小文件多时撞 FD 上限。
-    let mut handles = HandleCache::new(4);
-    // 一块 8 MiB，缓冲复用避免每块一次大分配
-    let mut block_buf = vec![0u8; BLOCK_SIZE];
-    let mut blocks_sent = 0u64;
+    // v0.15：接收端在 MANIFEST_ACK 里给出并行流数；旧接收端不回这个字段（0）就是单流。
+    let streams = streams.max(1).min(MAX_STREAMS);
+    // 每条数据连接先自报 txnId 与序号：并发接多台设备时靠 txnId 找回会话，
+    // 序号只用于日志与排障（接收入口按到达顺序投递给会话）。
+    let mut conns: Vec<BoxedStream> = Vec::with_capacity(streams as usize);
+    for k in 0..streams {
+        let mut s = opener.open()?;
+        write_message(
+            &mut s,
+            &Control::DataHello {
+                txn_id: manifest.txn_id.clone(),
+                stream: k,
+            },
+        )?;
+        conns.push(s);
+    }
+    // 汇总计数用原子值：多条流各自在跑，主线程只读总数回调进度
+    let blocks_sent = AtomicU64::new(0);
+    let bytes_sent = AtomicU64::new(0);
     // v0.14：收到的 PACK_REQ 数，进 SendReport 供测试与排障判断 pack 是否生效
-    let mut packs_received = 0u64;
+    let packs_received = AtomicU64::new(0);
+    // 任一条流失败就置位，其余流处理完当前块后退出，整场会话按失败收尾
+    let abort = AtomicBool::new(false);
     // 总块数按清单累加：接收端只会请求已接受的块，用总数做分母足够稳定
     let total_blocks: u64 = manifest.files.iter().map(|f| f.block_count() as u64).sum();
-    let mut bytes_sent = 0u64;
-    // 速率滑动窗口：只留最近约 1 秒的采样点，用首尾差算平均速率。
-    // 保留至少两个点，否则第一块时算不出差值。
-    const SPEED_WINDOW: Duration = Duration::from_millis(1000);
-    let mut speed_samples: VecDeque<(Instant, u64)> = VecDeque::new();
+    let shared = SenderShared {
+        manifest: &manifest,
+        accepted: &accepted_ids,
+        sources: &source_map,
+        blocks: &blocks_sent,
+        bytes: &bytes_sent,
+        packs: &packs_received,
+        abort: &abort,
+        total_blocks,
+    };
 
-    loop {
-        // 每块之前看一次控制位。暂停时不再供块：接收端最多 4 个在途请求发完自然停住，
-        // 期间连接不断、位图与已传块都还在，继续后从断点接着发。
-        if let Some(c) = control {
-            if c.is_cancelled() {
-                return Err(io_err("发送已取消"));
-            }
-            while c.is_paused() {
-                if c.is_cancelled() {
-                    return Err(io_err("发送已取消"));
+    // 0 号流由主线程服务，顺便回调进度；接收端按请求下标轮转切分，
+    // 保证 0 号流也始终有活，进度不会因为「活都跑到别的流上」而长时间停住。
+    let mut conns_iter = conns.into_iter();
+    let mut first = conns_iter.next().expect("至少有一条数据连接");
+    let mut speed = SpeedWindow::default();
+    let mut worker_err: Option<io::Error> = None;
+    thread::scope(|scope| {
+        let mut workers = Vec::new();
+        for mut conn in conns_iter {
+            let sh = &shared;
+            workers.push(scope.spawn(move || {
+                serve_sender_stream(sh, &mut *conn, control, None, None)
+            }));
+        }
+        // 进度回调只在主线程这条流上用：把它从 Option 里取出来交给服务循环，
+        // 避免在闭包里再借一层导致的寿命问题
+        let main_progress = progress.take();
+        if let Err(e) = serve_sender_stream(
+            &shared,
+            &mut *first,
+            control,
+            main_progress,
+            Some(&mut speed),
+        ) {
+            abort.store(true, Ordering::Relaxed);
+            worker_err = Some(e);
+        }
+        for w in workers {
+            match w.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    abort.store(true, Ordering::Relaxed);
+                    if worker_err.is_none() {
+                        worker_err = Some(e);
+                    }
                 }
-                thread::sleep(Duration::from_millis(120));
+                // 工作线程 panic：把原因带出去，不能当成正常传完
+                Err(_) => {
+                    abort.store(true, Ordering::Relaxed);
+                    if worker_err.is_none() {
+                        worker_err = Some(io_err("数据流线程异常退出"));
+                    }
+                }
             }
         }
-        let (req, payload) = read_frame(&mut data)?;
-        match req.kind {
-            FrameType::BlockReq => {
-                let entry = manifest
-                    .files
-                    .get(req.file_id as usize)
-                    .ok_or_else(|| io_err("BLOCK_REQ references unknown fileId"))?;
-                if !accepted_ids.contains(&entry.id) {
-                    return Err(io_err("receiver requested a file it did not accept"));
-                }
-                let abs = source_map
-                    .get(&entry.id)
-                    .ok_or_else(|| io_err("missing source path"))?;
-                let f = handles.get_mut(req.file_id, abs)?;
-                f.seek(SeekFrom::Start(req.block_index as u64 * BLOCK_SIZE as u64))?;
-                // 缓冲提到循环外复用：8 MiB 一块时每块重新分配既费时又制造内存抖动
-                let n = read_full_block(f, &mut block_buf)?;
-                let out = FrameHeader::new(FrameType::BlockData, req.file_id, req.block_index);
-                write_frame(&mut data, &out, &block_buf[..n])?;
-                blocks_sent += 1;
-                bytes_sent += n as u64;
-                let now = Instant::now();
-                speed_samples.push_back((now, bytes_sent));
-                while speed_samples.len() > 2
-                    && now.duration_since(speed_samples[0].0) > SPEED_WINDOW
-                {
-                    speed_samples.pop_front();
-                }
-                let speed_bps = if speed_samples.len() >= 2 {
-                    let (t0, b0) = speed_samples[0];
-                    let dt = now.duration_since(t0).as_secs_f64();
-                    if dt > 0.0 {
-                        ((bytes_sent - b0) as f64 / dt) as u64
-                    } else {
-                        0
-                    }
-                } else {
-                    0
-                };
-                if let Some(cb) = progress.as_mut() {
-                    cb(SendProgress {
-                        files: manifest.total_files,
-                        bytes_sent,
-                        total_bytes: manifest.total_bytes,
-                        blocks_sent,
-                        total_blocks,
-                        current: entry.rel_path.clone(),
-                        // 传输阶段的扫描字段保持默认，界面按 phase 判断该显示百分比
-                        speed_bps,
-                        ..Default::default()
-                    });
-                }
-            }
-            FrameType::PackReq => {
-                // v0.14：一个请求带多块，按列表顺序连续回 BlockData；
-                // 帧格式与单块路径完全一致，接收端照旧逐块落盘与校验。
-                packs_received += 1;
-                let pr: PackRequest = serde_json::from_slice(&payload)
-                    .map_err(|e| io_err(format!("PACK_REQ 解析失败: {e}")))?;
-                if pr.blocks.len() > PACK_MAX_BLOCKS {
-                    return Err(io_err("PACK_REQ 块数超过上限"));
-                }
-                for (file_id, block_index) in pr.blocks {
-                    let entry = manifest
-                        .files
-                        .get(file_id as usize)
-                        .ok_or_else(|| io_err("PACK_REQ references unknown fileId"))?;
-                    if !accepted_ids.contains(&entry.id) {
-                        return Err(io_err("receiver requested a file it did not accept"));
-                    }
-                    let abs = source_map
-                        .get(&entry.id)
-                        .ok_or_else(|| io_err("missing source path"))?;
-                    let f = handles.get_mut(file_id, abs)?;
-                    f.seek(SeekFrom::Start(block_index as u64 * BLOCK_SIZE as u64))?;
-                    let n = read_full_block(f, &mut block_buf)?;
-                    let out = FrameHeader::new(FrameType::BlockData, file_id, block_index);
-                    write_frame(&mut data, &out, &block_buf[..n])?;
-                    blocks_sent += 1;
-                    bytes_sent += n as u64;
-                    let now = Instant::now();
-                    speed_samples.push_back((now, bytes_sent));
-                    while speed_samples.len() > 2
-                        && now.duration_since(speed_samples[0].0) > SPEED_WINDOW
-                    {
-                        speed_samples.pop_front();
-                    }
-                    let speed_bps = if speed_samples.len() >= 2 {
-                        let (t0, b0) = speed_samples[0];
-                        let dt = now.duration_since(t0).as_secs_f64();
-                        if dt > 0.0 {
-                            ((bytes_sent - b0) as f64 / dt) as u64
-                        } else {
-                            0
-                        }
-                    } else {
-                        0
-                    };
-                    if let Some(cb) = progress.as_mut() {
-                        cb(SendProgress {
-                            files: manifest.total_files,
-                            bytes_sent,
-                            total_bytes: manifest.total_bytes,
-                            blocks_sent,
-                            total_blocks,
-                            current: entry.rel_path.clone(),
-                            speed_bps,
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
-            FrameType::Done => break,
-            other => return Err(io_err(format!("unexpected frame: {other:?}"))),
-        }
+    });
+    if let Some(e) = worker_err {
+        return Err(e);
     }
 
     write_message(
@@ -963,12 +933,185 @@ pub fn run_sender_with_device_control_opts(
         txn_id: manifest.txn_id,
         files: manifest.total_files,
         bytes: manifest.total_bytes,
-        blocks_sent,
-        packs: packs_received,
+        blocks_sent: blocks_sent.load(Ordering::Relaxed),
+        packs: packs_received.load(Ordering::Relaxed),
+        streams,
         files_skipped,
         dest_dirs,
         verdict,
     })
+}
+
+/// 多流发送时各线程共享的只读上下文与汇总计数。
+struct SenderShared<'a> {
+    manifest: &'a Manifest,
+    accepted: &'a HashSet<String>,
+    sources: &'a HashMap<String, PathBuf>,
+    blocks: &'a AtomicU64,
+    bytes: &'a AtomicU64,
+    packs: &'a AtomicU64,
+    abort: &'a AtomicBool,
+    total_blocks: u64,
+}
+
+/// 速率滑动窗口：只留最近约 1 秒的采样点，用首尾差算平均速率。
+/// 保留至少两个点，否则第一块时算不出差值。
+const SPEED_WINDOW: Duration = Duration::from_millis(1000);
+
+#[derive(Default)]
+struct SpeedWindow {
+    samples: VecDeque<(Instant, u64)>,
+}
+
+impl SpeedWindow {
+    fn sample(&mut self, total: u64) -> u64 {
+        let now = Instant::now();
+        self.samples.push_back((now, total));
+        while self.samples.len() > 2 && now.duration_since(self.samples[0].0) > SPEED_WINDOW {
+            self.samples.pop_front();
+        }
+        if self.samples.len() < 2 {
+            return 0;
+        }
+        let (t0, b0) = self.samples[0];
+        let dt = now.duration_since(t0).as_secs_f64();
+        if dt > 0.0 {
+            ((total - b0) as f64 / dt) as u64
+        } else {
+            0
+        }
+    }
+}
+
+/// 一条数据流上的供块循环。多流时每条流一个线程，各自持有句柄缓存与读缓冲；
+/// 清单、源路径映射与计数是共享只读/原子的，不需要加锁。
+fn serve_sender_stream(
+    shared: &SenderShared<'_>,
+    stream: &mut dyn Stream,
+    control: Option<&SendControl>,
+    mut progress: Option<&mut dyn FnMut(SendProgress)>,
+    mut speed: Option<&mut SpeedWindow>,
+) -> io::Result<()> {
+    // 缓存最近用过的文件句柄：一个大文件上千块不用重复 open；
+    // 容量固定，切到别的文件时关掉最久未用的，避免小文件多时撞 FD 上限。
+    let mut handles = HandleCache::new(4);
+    // 一块 8 MiB，缓冲复用避免每块一次大分配
+    let mut block_buf = vec![0u8; BLOCK_SIZE];
+
+    loop {
+        // 别的流失败后本流尽快退出，不把剩下的块白传完
+        if shared.abort.load(Ordering::Relaxed) {
+            return Err(io_err("另一条数据流失败，本次发送中止"));
+        }
+        // 每块之前看一次控制位。暂停时不再供块：接收端最多 4 个在途请求发完自然停住，
+        // 期间连接不断、位图与已传块都还在，继续后从断点接着发。
+        if let Some(c) = control {
+            if c.is_cancelled() {
+                return Err(io_err("发送已取消"));
+            }
+            while c.is_paused() {
+                if c.is_cancelled() {
+                    return Err(io_err("发送已取消"));
+                }
+                thread::sleep(Duration::from_millis(120));
+            }
+        }
+        let (req, payload) = read_frame(stream)?;
+        match req.kind {
+            FrameType::BlockReq => {
+                let rel = send_block(
+                    shared,
+                    &mut handles,
+                    &mut block_buf,
+                    stream,
+                    req.file_id,
+                    req.block_index,
+                    "BLOCK_REQ",
+                )?;
+                report_progress(&mut progress, &mut speed, shared, &rel);
+            }
+            FrameType::PackReq => {
+                // v0.14：一个请求带多块，按列表顺序连续回 BlockData；
+                // 帧格式与单块路径完全一致，接收端照旧逐块落盘与校验。
+                shared.packs.fetch_add(1, Ordering::Relaxed);
+                let pr: PackRequest = serde_json::from_slice(&payload)
+                    .map_err(|e| io_err(format!("PACK_REQ 解析失败: {e}")))?;
+                if pr.blocks.len() > PACK_MAX_BLOCKS {
+                    return Err(io_err("PACK_REQ 块数超过上限"));
+                }
+                for (file_id, block_index) in pr.blocks {
+                    let rel = send_block(
+                        shared,
+                        &mut handles,
+                        &mut block_buf,
+                        stream,
+                        file_id,
+                        block_index,
+                        "PACK_REQ",
+                    )?;
+                    report_progress(&mut progress, &mut speed, shared, &rel);
+                }
+            }
+            FrameType::Done => return Ok(()),
+            other => return Err(io_err(format!("unexpected frame: {other:?}"))),
+        }
+    }
+}
+
+/// 读一个块并写回 BLOCK_DATA，返回该块所属的相对路径（给进度用）。
+fn send_block(
+    shared: &SenderShared<'_>,
+    handles: &mut HandleCache,
+    block_buf: &mut [u8],
+    stream: &mut dyn Stream,
+    file_id: u64,
+    block_index: u32,
+    what: &str,
+) -> io::Result<String> {
+    let entry = shared
+        .manifest
+        .files
+        .get(file_id as usize)
+        .ok_or_else(|| io_err(format!("{what} references unknown fileId")))?;
+    if !shared.accepted.contains(&entry.id) {
+        return Err(io_err("receiver requested a file it did not accept"));
+    }
+    let abs = shared
+        .sources
+        .get(&entry.id)
+        .ok_or_else(|| io_err("missing source path"))?;
+    let f = handles.get_mut(file_id, abs)?;
+    f.seek(SeekFrom::Start(block_index as u64 * BLOCK_SIZE as u64))?;
+    let n = read_full_block(f, block_buf)?;
+    let out = FrameHeader::new(FrameType::BlockData, file_id, block_index);
+    write_frame(stream, &out, &block_buf[..n])?;
+    shared.blocks.fetch_add(1, Ordering::Relaxed);
+    shared.bytes.fetch_add(n as u64, Ordering::Relaxed);
+    Ok(entry.rel_path.clone())
+}
+
+/// 进度回调只在主线程那条流上发生：字节与块数取原子总数，因此显示的是全会话进度。
+fn report_progress(
+    progress: &mut Option<&mut dyn FnMut(SendProgress)>,
+    speed: &mut Option<&mut SpeedWindow>,
+    shared: &SenderShared<'_>,
+    current: &str,
+) {
+    let bytes = shared.bytes.load(Ordering::Relaxed);
+    let speed_bps = speed.as_mut().map(|s| s.sample(bytes)).unwrap_or(0);
+    if let Some(cb) = progress.as_mut() {
+        cb(SendProgress {
+            files: shared.manifest.total_files,
+            bytes_sent: bytes,
+            total_bytes: shared.manifest.total_bytes,
+            blocks_sent: shared.blocks.load(Ordering::Relaxed),
+            total_blocks: shared.total_blocks,
+            current: current.to_string(),
+            // 传输阶段的扫描字段保持默认，界面按 phase 判断该显示百分比
+            speed_bps,
+            ..Default::default()
+        });
+    }
 }
 
 fn build_source_map(paths: &[PathBuf], m: &Manifest) -> io::Result<HashMap<String, PathBuf>> {
@@ -1036,6 +1179,27 @@ pub fn run_receiver_with(
     )
 }
 
+/// v0.15：并行流数可配的明文入口（排障 / 测速对比用）。
+pub fn run_receiver_with_streams(
+    accepter: &dyn Accepter,
+    dest: &Path,
+    max_blocks: Option<usize>,
+    expected_pair_code: Option<&str>,
+    root_map: &HashMap<String, String>,
+    streams: u8,
+) -> io::Result<ReceiverReport> {
+    run_receiver_with_store_gate_streams(
+        accepter,
+        dest,
+        max_blocks,
+        expected_pair_code,
+        root_map,
+        &mut PathStore,
+        None,
+        streams,
+    )
+}
+
 /// 带落盘后端的版本：桌面/NAS 用 PathStore，Android SAF 用 tc-jni 提供的 fd 后端。
 /// dest 在 SAF 下只是一个虚拟根，真正落点由后端按相对路径决定。
 pub fn run_receiver_with_store(
@@ -1087,6 +1251,52 @@ pub fn run_receiver_with_store_gate(
     store: &mut dyn Store,
     gate: Option<&TrustGate>,
 ) -> io::Result<ReceiverReport> {
+    run_receiver_with_store_gate_streams(
+        accepter,
+        dest,
+        max_blocks,
+        expected_pair_code,
+        root_map,
+        store,
+        gate,
+        DEFAULT_STREAMS,
+    )
+}
+
+/// v0.15：并行流数可配的版本。`streams` 只是「最多开几条」，
+/// 实际条数还要看对端是否声明 `streams` 能力与本次工作量（见 `effective_streams`）。
+pub fn run_receiver_with_gate_streams(
+    accepter: &dyn Accepter,
+    dest: &Path,
+    max_blocks: Option<usize>,
+    expected_pair_code: Option<&str>,
+    root_map: &HashMap<String, String>,
+    gate: Option<&TrustGate>,
+    streams: u8,
+) -> io::Result<ReceiverReport> {
+    run_receiver_with_store_gate_streams(
+        accepter,
+        dest,
+        max_blocks,
+        expected_pair_code,
+        root_map,
+        &mut PathStore,
+        gate,
+        streams,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_receiver_with_store_gate_streams(
+    accepter: &dyn Accepter,
+    dest: &Path,
+    max_blocks: Option<usize>,
+    expected_pair_code: Option<&str>,
+    root_map: &HashMap<String, String>,
+    store: &mut dyn Store,
+    gate: Option<&TrustGate>,
+    streams: u8,
+) -> io::Result<ReceiverReport> {
     let (mut ctrl, peer_addr) = accepter.accept_with_peer()?;
     let first = read_message::<_, Control>(&mut ctrl)?;
     // 读到 HELLO 说明 TLS 握手已完成，这时取客户端证书才是可靠的
@@ -1109,24 +1319,27 @@ pub fn run_receiver_with_store_gate(
             trust: gate,
             peer_fp,
         },
+        streams,
     )
 }
 
 /// 数据通道的取法。单会话按 accept 顺序取，并发 hub 按 txnId 从路由表取，
-/// 两种接入方式共用同一套会话状态机。
+/// 两种接入方式共用同一套会话状态机。v0.15 起一次要取 `streams` 条。
 pub trait DataConn {
-    fn take(&mut self, txn_id: &str) -> io::Result<BoxedStream>;
+    fn take(&mut self, txn_id: &str, streams: u8) -> io::Result<Vec<BoxedStream>>;
 }
 
-/// 单会话模式：继续 accept，直到拿到声明了本会话 txnId 的数据连接。
+/// 单会话模式：继续 accept，直到凑齐声明了本会话 txnId 的 N 条数据连接。
 /// 期间接入的其他设备一律回 BUSY，避免它们一直等到超时才发现没人接。
 struct AcceptNext<'a> {
     accepter: &'a dyn Accepter,
 }
 
 impl DataConn for AcceptNext<'_> {
-    fn take(&mut self, txn_id: &str) -> io::Result<BoxedStream> {
-        loop {
+    fn take(&mut self, txn_id: &str, streams: u8) -> io::Result<Vec<BoxedStream>> {
+        let want = streams.max(1) as usize;
+        let mut got = Vec::with_capacity(want);
+        while got.len() < want {
             let mut stream = self.accepter.accept()?;
             let first = match read_message::<_, Control>(&mut stream) {
                 Ok(c) => c,
@@ -1134,8 +1347,8 @@ impl DataConn for AcceptNext<'_> {
                 Err(_) => continue,
             };
             match first {
-                Control::DataHello { txn_id: got } if got == txn_id => return Ok(stream),
-                Control::DataHello { txn_id: got } => {
+                Control::DataHello { txn_id: got_id, .. } if got_id == txn_id => got.push(stream),
+                Control::DataHello { txn_id: got, .. } => {
                     let _ = write_message(
                         &mut stream,
                         &Control::Busy {
@@ -1161,6 +1374,7 @@ impl DataConn for AcceptNext<'_> {
                 }
             }
         }
+        Ok(got)
     }
 }
 
@@ -1205,6 +1419,170 @@ impl PathClaims {
     }
 }
 
+/// 一条数据流上的统计，多流时各线程各算一份，收尾相加。
+struct StreamStats {
+    blocks_written: u64,
+    wait_us: u64,
+    write_us: u64,
+    req_us: u64,
+}
+
+/// 取某个文件的半成品锁。上一把锁的持有者写盘失败时互斥量会被标记中毒，
+/// 但这里只是收尾报错，取回内部值继续比直接 panic 更有用。
+fn lock_part(p: &Arc<Mutex<PartFile>>) -> std::sync::MutexGuard<'_, PartFile> {
+    p.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 收一块并落盘。同一文件的并发块在这里串行，写完立刻释放句柄（v0.14 的 fd 修复）。
+fn write_block_to(
+    parts: &HashMap<usize, Arc<Mutex<PartFile>>>,
+    file_idx: usize,
+    block_idx: u32,
+    payload: &[u8],
+) -> io::Result<()> {
+    let part = parts
+        .get(&file_idx)
+        .ok_or_else(|| io_err("part not opened for this file"))?;
+    let mut part = lock_part(part);
+    part.write_block(block_idx, payload)?;
+    part.close_handles();
+    Ok(())
+}
+
+/// 一条数据流上的收块循环：发请求、等块、落盘、最后回一条 DONE。
+/// 单流与多流共用：多流时每条连接一个线程，`requests` 是切给它的那一段。
+#[allow(clippy::too_many_arguments)]
+fn recv_stream(
+    stream: &mut dyn Stream,
+    requests: &[(u64, u32)],
+    manifest: &Manifest,
+    parts: &HashMap<usize, Arc<Mutex<PartFile>>>,
+    pack_enabled: bool,
+    window: usize,
+    max_blocks: Option<usize>,
+    mut inc: Option<&mut IncVerify>,
+    abort: &AtomicBool,
+) -> io::Result<StreamStats> {
+    let mut st = StreamStats {
+        blocks_written: 0,
+        wait_us: 0,
+        write_us: 0,
+        req_us: 0,
+    };
+
+    // v0.14：pack 路径。把待传块按「块数 ≤256、字节 ≤64 MiB」切包，
+    // 一包只发一个 PackReq，然后连续收它的 N 个 BlockData。
+    // 小文件时这是把「每文件一次往返」压成「每包一次」的关键。
+    if pack_enabled {
+        let mut idx = 0usize;
+        while idx < requests.len() {
+            if abort.load(Ordering::Relaxed) {
+                return Err(io_err("另一条数据流失败，本次接收中止"));
+            }
+            let mut chunk: Vec<(u64, u32)> = Vec::new();
+            let mut chunk_bytes = 0usize;
+            while idx < requests.len() && chunk.len() < PACK_MAX_BLOCKS {
+                let (f, b) = requests[idx];
+                let fsize = manifest.files[f as usize].size;
+                let start = b as u64 * BLOCK_SIZE as u64;
+                let size = if fsize > start {
+                    (fsize - start).min(BLOCK_SIZE as u64) as usize
+                } else {
+                    0
+                };
+                if !chunk.is_empty() && chunk_bytes + size > PACK_MAX_BYTES {
+                    break;
+                }
+                chunk.push((f, b));
+                chunk_bytes += size;
+                idx += 1;
+            }
+            let payload = serde_json::to_vec(&PackRequest {
+                blocks: chunk.clone(),
+            })
+            .map_err(|e| io_err(format!("PACK_REQ 编码失败: {e}")))?;
+            let t_req = Instant::now();
+            write_frame(stream, &FrameHeader::new(FrameType::PackReq, 0, 0), &payload)?;
+            st.req_us += t_req.elapsed().as_micros() as u64;
+            for (file_idx, block_idx) in chunk {
+                let t_wait = Instant::now();
+                let (resp, payload) = read_frame(stream)?;
+                st.wait_us += t_wait.elapsed().as_micros() as u64;
+                if resp.kind != FrameType::BlockData
+                    || resp.file_id != file_idx
+                    || resp.block_index != block_idx
+                {
+                    return Err(io_err("BLOCK_DATA does not match the packed request"));
+                }
+                let t_write = Instant::now();
+                write_block_to(parts, file_idx as usize, block_idx, &payload)?;
+                st.write_us += t_write.elapsed().as_micros() as u64;
+                if let Some(v) = inc.as_mut() {
+                    v.feed(&manifest.files, file_idx as usize, block_idx, &payload);
+                }
+                st.blocks_written += 1;
+            }
+        }
+        return finish_stream(stream, st);
+    }
+
+    let mut next_req = 0usize;
+    let mut inflight: VecDeque<(u64, u32)> = VecDeque::new();
+    while inflight.len() < window && next_req < requests.len() {
+        let (f, b) = requests[next_req];
+        let t_req = Instant::now();
+        write_frame(stream, &FrameHeader::new(FrameType::BlockReq, f, b), &[])?;
+        st.req_us += t_req.elapsed().as_micros() as u64;
+        inflight.push_back((f, b));
+        next_req += 1;
+    }
+
+    while let Some((file_idx, block_idx)) = inflight.pop_front() {
+        let t_wait = Instant::now();
+        let (resp, payload) = read_frame(stream)?;
+        st.wait_us += t_wait.elapsed().as_micros() as u64;
+        if resp.kind != FrameType::BlockData
+            || resp.file_id != file_idx
+            || resp.block_index != block_idx
+        {
+            return Err(io_err("BLOCK_DATA does not match the request"));
+        }
+        let t_write = Instant::now();
+        write_block_to(parts, file_idx as usize, block_idx, &payload)?;
+        st.write_us += t_write.elapsed().as_micros() as u64;
+        // 顺路把块哈希和根哈希算掉：这段 CPU 本来就在等下一块的空档里，等于白捡
+        if let Some(v) = inc.as_mut() {
+            v.feed(&manifest.files, file_idx as usize, block_idx, &payload);
+        }
+        st.blocks_written += 1;
+        if let Some(max) = max_blocks {
+            if st.blocks_written as usize >= max {
+                // 模拟中断：位图已落盘，下次启动只补缺口
+                return finish_stream(stream, st);
+            }
+        }
+        if inflight.is_empty() && next_req >= requests.len() {
+            break;
+        }
+        // 补发下一个请求，保持窗口始终有货在天上
+        if next_req < requests.len() {
+            let (f, b) = requests[next_req];
+            let t_req = Instant::now();
+            write_frame(stream, &FrameHeader::new(FrameType::BlockReq, f, b), &[])?;
+            st.req_us += t_req.elapsed().as_micros() as u64;
+            inflight.push_back((f, b));
+            next_req += 1;
+        }
+    }
+    finish_stream(stream, st)
+}
+
+/// 每条流各自收尾：发送端按这条流上的 DONE 退出它对应的线程。
+fn finish_stream(stream: &mut dyn Stream, st: StreamStats) -> io::Result<StreamStats> {
+    write_frame(stream, &FrameHeader::new(FrameType::Done, 0, 0), &[])?;
+    Ok(st)
+}
+
 /// 一场传输的状态机。控制通道已就绪，数据通道由 data_conn 提供。
 /// 抽出来的目的是让单会话（tc recv / Android）与并发 hub 走同一份协议逻辑，行为不会分叉。
 fn handle_session(
@@ -1219,6 +1597,7 @@ fn handle_session(
     claims: &PathClaims,
     peer_addr: Option<&str>,
     gate: SessionGate<'_>,
+    streams: u8,
 ) -> io::Result<ReceiverReport> {
     // 设备信息随 HELLO 一起到，这里先留下：历史记录要写清来源，
     // 不能等到协议跑完再回头找（那时控制连接可能已经断开）
@@ -1296,7 +1675,7 @@ fn handle_session(
         &Control::HelloAck {
             version: PROTOCOL_VERSION.into(),
             block_size: BLOCK_SIZE as u32,
-            caps: vec![CAP_PACK.to_string()],
+            caps: vec![CAP_PACK.to_string(), CAP_STREAMS.to_string()],
         },
     )?;
 
@@ -1348,18 +1727,31 @@ fn handle_session(
         .filter(|(i, _)| !skipped_set.contains(i))
         .map(|(_, f)| f.id.clone())
         .collect();
+    // v0.15：并行条数要在 ACK 里告诉发送端，所以先按「本次要传多少块」收敛一次。
+    // 这里只算总数，不打开任何文件；真正的缺块集合在 ACK 之后才逐文件读位图。
+    let active_blocks: u64 = manifest
+        .files
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !skipped_set.contains(i))
+        .map(|(_, f)| f.block_count() as u64)
+        .sum();
+    let streams = effective_streams(streams, &peer_caps, active_blocks, max_blocks);
     write_message(
         ctrl,
         &Control::ManifestAck {
             accepted_roots,
             skipped_roots: Vec::new(),
             accepted_file_ids,
+            streams,
         },
     )?;
 
     store.make_dirs(&layout.dirs)?;
 
-    let mut parts: HashMap<usize, PartFile> = HashMap::new();
+    // v0.15：每个文件一把锁。多流同时拉同一个大文件的不同块时，
+    // 同文件的写盘与位图追加必须串行，不同文件之间互不阻塞。
+    let mut parts: HashMap<usize, Arc<Mutex<PartFile>>> = HashMap::new();
     let mut requests: Vec<(u64, u32)> = Vec::new();
     let mut resumed_blocks = 0u64;
     for (i, f) in manifest.files.iter().enumerate() {
@@ -1375,143 +1767,109 @@ fn handle_session(
         // v0.14：位图读进内存后立刻释放文件与位图句柄。
         // 否则几千个小文件会在传输开始前就各占两个 fd，NAS 上直接 Too many open files。
         part.close_handles();
-        parts.insert(i, part);
+        parts.insert(i, Arc::new(Mutex::new(part)));
     }
 
-    // 数据通道在这里才取：之前必须先回 MANIFEST_ACK，发送端收到它才会开第二条连接
-    let mut data = data_conn.take(&txn_id)?;
-    let mut blocks_written = 0u64;
-    // P0：分别累计「等数据」与「写盘」的耗时，用来判断 406 ms/块 里谁占大头
+    // 数据通道在这里才取：之前必须先回 MANIFEST_ACK，发送端收到它才会开数据连接
+    let conns = data_conn.take(&txn_id, streams)?;
+    // P0：分别累计「等数据」与「写盘」的耗时，用来判断慢在哪一段
     let mut wait_us = 0u64;
     let mut write_us = 0u64;
-    // 发请求本身也可能阻塞（对端收得慢时 socket 发送缓冲会满），但这段以前不计入任何计时器，
-    // 表现为「日志里的两段之和比手机端墙钟少 8–14 秒」。这里单独累计，用来归因。
+    // 发请求本身也可能阻塞（对端收得慢时 socket 发送缓冲会满），单独累计用于归因
     let mut req_us = 0u64;
-    // 预取窗口：先抛出两个请求再开始收，让「等下一块的数据」与「写上一块」重叠。
-    // 单块 4 MiB 在当前链路约 40 ms，实测 RTT 3~17 ms，严格一问一答等于每块白等一个往返。
-    // 线上格式不用改：发送端本来就是「收到 BlockReq 就回 BlockData」的循环，多一个在途请求它能正常处理。
-    // 只有模拟中断（max_blocks）时退回窗口 1，否则会多发出请求，位图与中断语义都会对不上。
-    // 窗口 2 实测把网络段从 98 MB/s 拉到 124 MB/s；加到 4 是为吸收抖动块（实测最大 RTT 16.8 ms），
-    // 内存代价是 16 MiB 在途数据，接收端完全承受得起。
-    // v0.14：双方都声明 pack 才启用；模拟中断（max_blocks）仍走逐块，保证续传测试语义不变
+    // 预取窗口：先抛出几个请求再开始收，让「等下一块的数据」与「写上一块」重叠。
+    // 只有模拟中断（max_blocks）时退回窗口 1，否则多发出的请求会让续传语义对不上。
+    // v0.14：双方都声明 pack 才启用；模拟中断仍走逐块，保证续传测试语义不变。
     let pack_enabled = max_blocks.is_none() && peer_caps.iter().any(|c| c == CAP_PACK);
     let window = if max_blocks.is_some() { 1 } else { 4 };
-    // 全新传输才开增量校验：续传的块集合不连续，累积不出正确根哈希
-    let mut inc = IncVerify::new(resumed_blocks == 0);
-    let mut next_req = 0usize;
-    let mut inflight: VecDeque<(u64, u32)> = VecDeque::new();
+    // 全新传输才开增量校验：续传的块集合不连续，累积不出正确根哈希；
+    // 多流时块到达顺序按流交错，也无法累积根哈希，收尾一律退回全量校验。
+    let mut inc = IncVerify::new(resumed_blocks == 0 && conns.len() <= 1);
+    let mut blocks_written = 0u64;
+    let abort = AtomicBool::new(false);
 
-    // v0.14：pack 路径。把待传块按「块数 ≤256、字节 ≤64 MiB」切包，
-    // 一包只发一个 PackReq，然后连续收它的 N 个 BlockData。
-    // 小文件时这是把「每文件一次往返」压成「每包一次」的关键。
-    if pack_enabled {
-        let mut idx = 0usize;
-        while idx < requests.len() {
-            let mut chunk: Vec<(u64, u32)> = Vec::new();
-            let mut chunk_bytes = 0usize;
-            while idx < requests.len() && chunk.len() < PACK_MAX_BLOCKS {
-                let (f, b) = requests[idx];
-                let fsize = manifest.files[f as usize].size;
-                let start = b as u64 * BLOCK_SIZE as u64;
-                let size = if fsize > start {
-                    (fsize - start).min(BLOCK_SIZE as u64) as usize
-                } else {
-                    0
-                };
-                if !chunk.is_empty() && chunk_bytes + size > PACK_MAX_BYTES {
-                    break;
-                }
-                chunk.push((f, b));
-                chunk_bytes += size;
-                idx += 1;
+    if conns.len() <= 1 {
+        let mut conn = conns
+            .into_iter()
+            .next()
+            .ok_or_else(|| io_err("data channel did not arrive"))?;
+        let st = recv_stream(
+            &mut *conn,
+            &requests,
+            &manifest,
+            &parts,
+            pack_enabled,
+            window,
+            max_blocks,
+            Some(&mut inc),
+            &abort,
+        )?;
+        blocks_written += st.blocks_written;
+        wait_us += st.wait_us;
+        write_us += st.write_us;
+        req_us += st.req_us;
+    } else {
+        // v0.15：按请求下标轮转切分，同一文件的不同块会落到不同流上。
+        let n = conns.len();
+        let mut split: Vec<Vec<(u64, u32)>> = vec![Vec::new(); n];
+        for (i, r) in requests.iter().enumerate() {
+            split[i % n].push(*r);
+        }
+        let mut stats: Vec<io::Result<StreamStats>> = Vec::new();
+        // 传引用进去而不是把整个清单/表 move 进闭包：每条流都要看同一份只读数据
+        let manifest_ref = &manifest;
+        let parts_ref = &parts;
+        let abort_ref = &abort;
+        thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for (k, mut conn) in conns.into_iter().enumerate() {
+                let reqs = &split[k];
+                handles.push(scope.spawn(move || {
+                    recv_stream(
+                        &mut *conn,
+                        reqs,
+                        manifest_ref,
+                        parts_ref,
+                        pack_enabled,
+                        window,
+                        None,
+                        None,
+                        abort_ref,
+                    )
+                }));
             }
-            let payload = serde_json::to_vec(&PackRequest {
-                blocks: chunk.clone(),
-            })
-            .map_err(|e| io_err(format!("PACK_REQ 编码失败: {e}")))?;
-            let t_req = std::time::Instant::now();
-            write_frame(&mut data, &FrameHeader::new(FrameType::PackReq, 0, 0), &payload)?;
-            req_us += t_req.elapsed().as_micros() as u64;
-            for (file_idx, block_idx) in chunk {
-                let t_wait = std::time::Instant::now();
-                let (resp, payload) = read_frame(&mut data)?;
-                wait_us += t_wait.elapsed().as_micros() as u64;
-                if resp.kind != FrameType::BlockData
-                    || resp.file_id != file_idx
-                    || resp.block_index != block_idx
-                {
-                    return Err(io_err("BLOCK_DATA does not match the packed request"));
+            // 收尾在主线程做：等所有流把各自的缺口收完
+            for h in handles {
+                match h.join() {
+                    Ok(r) => stats.push(r),
+                    Err(_) => stats.push(Err(io_err("数据流线程异常退出"))),
                 }
-                let t_write = std::time::Instant::now();
-                {
-                    let part = parts
-                        .get_mut(&(file_idx as usize))
-                        .expect("part opened above");
-                    part.write_block(block_idx, &payload)?;
-                    // v0.14：写完立刻释放句柄。小文件成批到达时，
-                    // 同时打开几千个文件会把 fd 用尽（NAS 实测）。
-                    part.close_handles();
-                }
-                write_us += t_write.elapsed().as_micros() as u64;
-                inc.feed(&manifest.files, file_idx as usize, block_idx, &payload);
-                blocks_written += 1;
             }
-        }
-        // 块已全部走 pack 路径，让下面的逐块循环自然跳过
-        next_req = requests.len();
-    }
-
-    while inflight.len() < window && next_req < requests.len() {
-        let (f, b) = requests[next_req];
-        let t_req = std::time::Instant::now();
-        write_frame(&mut data, &FrameHeader::new(FrameType::BlockReq, f, b), &[])?;
-        req_us += t_req.elapsed().as_micros() as u64;
-        inflight.push_back((f, b));
-        next_req += 1;
-    }
-
-    while let Some((file_idx, block_idx)) = inflight.pop_front() {
-        let t_wait = std::time::Instant::now();
-        let (resp, payload) = read_frame(&mut data)?;
-        wait_us += t_wait.elapsed().as_micros() as u64;
-        if resp.kind != FrameType::BlockData
-            || resp.file_id != file_idx
-            || resp.block_index != block_idx
-        {
-            return Err(io_err("BLOCK_DATA does not match the request"));
-        }
-        let t_write = std::time::Instant::now();
-        {
-            let part = parts
-                .get_mut(&(file_idx as usize))
-                .expect("part opened above");
-            part.write_block(block_idx, &payload)?;
-            // v0.14：逐块兼容路径同样写完即释放句柄
-            part.close_handles();
-        }
-        write_us += t_write.elapsed().as_micros() as u64;
-        // 顺路把块哈希和根哈希算掉：这段 CPU 本来就在等下一块的空档里，等于白捡
-        inc.feed(&manifest.files, file_idx as usize, block_idx, &payload);
-        blocks_written += 1;
-        if let Some(max) = max_blocks {
-            if blocks_written as usize >= max {
-                break; // 模拟中断：位图已落盘，下次启动只补缺口
+        });
+        let mut failure: Option<io::Error> = None;
+        for r in stats {
+            match r {
+                Ok(st) => {
+                    blocks_written += st.blocks_written;
+                    wait_us += st.wait_us;
+                    write_us += st.write_us;
+                    req_us += st.req_us;
+                }
+                Err(e) => {
+                    // 已有流报错：让其余流也尽快停，不再把剩余的块白传完
+                    abort.store(true, Ordering::Relaxed);
+                    if failure.is_none() {
+                        failure = Some(e);
+                    }
+                }
             }
         }
-        // 补发下一个请求，保持窗口始终有货在天上
-        if next_req < requests.len() {
-            let (f, b) = requests[next_req];
-            let t_req = std::time::Instant::now();
-            write_frame(&mut data, &FrameHeader::new(FrameType::BlockReq, f, b), &[])?;
-            req_us += t_req.elapsed().as_micros() as u64;
-            inflight.push_back((f, b));
-            next_req += 1;
+        if let Some(e) = failure {
+            return Err(e);
         }
     }
 
     let interrupted = (blocks_written as usize) < requests.len();
-    let done = FrameHeader::new(FrameType::Done, 0, 0);
-    write_frame(&mut data, &done, &[])?;
 
     // 协议第 5 步：发送端会在控制通道补一条 DONE，必须先读掉再回裁决。
     // 漏掉这一步会让控制连接残留未读数据，Windows 关闭时发 RST，发送端就收不到 VERIFY_OK。
@@ -1526,6 +1884,7 @@ fn handle_session(
         bytes: manifest.total_bytes,
         blocks_written,
         resumed_blocks,
+        streams_used: streams,
         verified: false,
         interrupted,
         device: Some(device),
@@ -1555,13 +1914,14 @@ fn handle_session(
     // 增量校验已经把每个块的哈希和每个文件的根哈希都核对过了，这里只需要确认块确实收齐，
     // 再省掉一遍全量读盘；任何一项不满足（续传、块缺失、哈希不符）都退回原路径重算，绝不跳过校验。
     let inc_ok = inc.finish(&manifest.files).is_none()
-        && parts.values().all(|p| p.complete());
+        && parts.values().all(|p| lock_part(p).complete());
     for (i, f) in manifest.files.iter().enumerate() {
         // 增量跳过的文件没有 .tcpart：它们的内容在 ACK 之前就已核对过，
         // 这里只需要处理真正收过数据的文件
-        let Some(part) = parts.get_mut(&i) else {
+        let Some(part) = parts.get(&i) else {
             continue;
         };
+        let mut part = lock_part(part);
         if !inc_ok {
             if let Err(e) = part.verify(f) {
                 failure = Some(format!("{}: {e}", f.rel_path));
@@ -1572,9 +1932,9 @@ fn handle_session(
         part.close_handles();
         if let Err(e) = if force {
             // 强制重传：先让旧文件改名让位，本次文件保留源文件名
-            store.finalize_aside(part, &layout.final_paths[i])
+            store.finalize_aside(&mut part, &layout.final_paths[i])
         } else {
-            store.finalize(part, &layout.final_paths[i])
+            store.finalize(&mut part, &layout.final_paths[i])
         } {
             failure = Some(format!("{}: {e}", f.rel_path));
             break;
@@ -1633,6 +1993,8 @@ pub struct ReceiverHub {
     gate: Option<Arc<TrustGate>>,
     /// 等数据连接的秒数；测试会调小它，免得为验证释放逻辑真等一分钟
     data_wait_secs: u64,
+    /// v0.15：本实例最多允许的并行流数（1 = 关闭）
+    streams: u8,
 }
 
 impl ReceiverHub {
@@ -1654,7 +2016,14 @@ impl ReceiverHub {
             claims: PathClaims::default(),
             gate: None,
             data_wait_secs: DATA_WAIT_SECS,
+            streams: DEFAULT_STREAMS,
         }
+    }
+
+    /// 设置并行流数（1 = 关闭）。与 `with_gate` 一样，必须在 `Arc::new` 之前调用。
+    pub fn with_streams(mut self, streams: u8) -> Self {
+        self.streams = streams.clamp(1, MAX_STREAMS);
+        self
     }
 
     /// 注入信任门禁。必须在 `Arc::new` 之前调用，之后 hub 会被多个线程共享。
@@ -1720,7 +2089,7 @@ impl ReceiverHub {
                 let peer_fp = stream.peer_cert_fingerprint();
                 self.start_session(stream, first, peer_addr, peer_fp)
             }
-            Control::DataHello { txn_id } => {
+            Control::DataHello { txn_id, .. } => {
                 self.route_data(txn_id, stream);
                 None
             }
@@ -1802,6 +2171,7 @@ impl ReceiverHub {
                 trust: self.gate.as_deref(),
                 peer_fp,
             },
+            self.streams,
         );
 
         // 会话结束必须归还名额与落点声明，否则下一次传输会被自己占着的路径挡回去
@@ -1825,10 +2195,17 @@ struct ChannelData {
 }
 
 impl DataConn for ChannelData {
-    fn take(&mut self, _txn_id: &str) -> io::Result<BoxedStream> {
-        self.rx
-            .recv_timeout(self.wait)
-            .map_err(|_| io_err("data channel did not arrive in time"))
+    fn take(&mut self, _txn_id: &str, streams: u8) -> io::Result<Vec<BoxedStream>> {
+        let want = streams.max(1) as usize;
+        let mut got = Vec::with_capacity(want);
+        for _ in 0..want {
+            got.push(
+                self.rx
+                    .recv_timeout(self.wait)
+                    .map_err(|_| io_err("data channel did not arrive in time"))?,
+            );
+        }
+        Ok(got)
     }
 }
 
@@ -1836,6 +2213,17 @@ impl DataConn for ChannelData {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// v0.15：并行条数必须同时满足「对端声明能力」「工作量够」「非模拟中断」。
+    #[test]
+    fn effective_streams_needs_capability_and_work() {
+        let caps = vec!["pack".to_string(), "streams".to_string()];
+        assert_eq!(effective_streams(4, &caps, 100, None), 4);
+        assert_eq!(effective_streams(4, &caps, 7, None), 1, "块太少不值得开多流");
+        assert_eq!(effective_streams(4, &[], 100, None), 1, "对端没声明必须单流");
+        assert_eq!(effective_streams(4, &caps, 100, Some(1)), 1, "模拟中断必须单流");
+        assert_eq!(effective_streams(99, &caps, 100, None), MAX_STREAMS);
+    }
 
     /// 小文件多时必须封顶：旧实现只插不删，句柄数会跟着文件数一路涨到 FD 上限。
     #[test]

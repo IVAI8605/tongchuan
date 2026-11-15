@@ -88,6 +88,10 @@ pub fn run(opts: &DiagOptions) -> io::Result<PathBuf> {
             ));
             report.push_str(&format!("并发会话上限：{}\n", cfg.max_sessions));
             report.push_str(&format!(
+                "并行数据流：{}（1 = 关闭）\n",
+                cfg.streams.max(1)
+            ));
+            report.push_str(&format!(
                 "剪贴板中继：{}\n",
                 if cfg.clip_listen.trim().is_empty() {
                     "未启用".to_string()

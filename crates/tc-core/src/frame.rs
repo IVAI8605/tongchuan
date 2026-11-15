@@ -95,7 +95,8 @@ impl FrameHeader {
     }
 }
 
-pub fn write_frame<W: Write>(w: &mut W, header: &FrameHeader, payload: &[u8]) -> io::Result<()> {
+/// `?Sized`：会话层直接传 `&mut dyn Stream`，多流路径里不再额外包一层具体类型。
+pub fn write_frame<W: Write + ?Sized>(w: &mut W, header: &FrameHeader, payload: &[u8]) -> io::Result<()> {
     // 长度以真实负载为准，避免调用方忘记同步 header.length 导致对端读错位
     let mut h = header.clone();
     h.length = payload.len() as u32;
@@ -104,7 +105,7 @@ pub fn write_frame<W: Write>(w: &mut W, header: &FrameHeader, payload: &[u8]) ->
     w.flush()
 }
 
-pub fn read_frame<R: Read>(r: &mut R) -> io::Result<(FrameHeader, Vec<u8>)> {
+pub fn read_frame<R: Read + ?Sized>(r: &mut R) -> io::Result<(FrameHeader, Vec<u8>)> {
     let mut raw = [0u8; HEADER_LEN];
     r.read_exact(&mut raw)?;
     let h = FrameHeader::decode(&raw)?;

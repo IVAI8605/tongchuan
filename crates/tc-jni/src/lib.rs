@@ -24,7 +24,7 @@ use tc_core::run_sender_with_device_control_opts;
 use tc_core::SendControl;
 use tc_core::SendProgress;
 // P3：手机才是落盘入口，接收端必须和桌面一样走信任门禁，不能只靠 PC 侧把关
-use tc_core::{run_receiver_with_gate, TrustGate, TrustMode, TrustStore};
+use tc_core::{run_receiver_with_gate_streams, TrustGate, TrustMode, TrustStore};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static HANDLES: OnceLock<Mutex<HashMap<u64, Arc<Runtime>>>> = OnceLock::new();
@@ -176,13 +176,16 @@ pub fn start_receiver_with(config_json: &str, notifier: Option<Notifier>) -> Res
             cfg2.pair_code.clone(),
         );
         while !stop2.load(Ordering::Relaxed) {
-            match run_receiver_with_gate(
+            // v0.15：Android 接收端固定单流。多条 TLS 流在手机上会明显增加 CPU 与发热，
+            // 而手机作为发送方时仍会按对端要求开多流；接收端并行留到有温升实测数据后再开。
+            match run_receiver_with_gate_streams(
                 &acc,
                 &cfg2.destination,
                 None,
                 cfg2.pair_code.as_deref(),
                 &HashMap::new(),
                 Some(&gate),
+                1,
             ) {
                 Ok(r) => {
                     rt2.sessions.fetch_add(1, Ordering::Relaxed);

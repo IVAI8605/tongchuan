@@ -601,3 +601,33 @@ fn many_small_files_use_pack_path() {
         assert_eq!(fs::read(&p).unwrap(), format!("hello-{i}").as_bytes());
     }
 }
+
+/// v0.15：多流要真的开起来；同一个大文件被切到多条流上并行拉，
+/// 落盘后仍必须拼回正确内容（多流路径不走增量校验，这里顺带验证全量校验兜底）。
+#[test]
+fn parallel_streams_split_one_large_file() {
+    let base = test_dir("streams-large");
+    let src = base.join("src");
+    // 9 块：超过「少于 8 块退回单流」的门槛，确保真的开多流
+    let data: Vec<u8> = (0..(BLOCK_SIZE * 8 + 4096))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    write_file(&src.join("big.bin"), &data);
+    let dest = base.join("dest");
+    fs::create_dir_all(&dest).unwrap();
+    let (listener, addr) = listener_and_addr();
+    let d = dest.clone();
+    let recv = thread::spawn(move || run_receiver_on(listener, &d, None).unwrap());
+    let sent = run_sender(&addr, &[src]).unwrap();
+    let r = recv.join().unwrap();
+
+    assert_eq!(sent.verdict, "OK");
+    assert_eq!(sent.streams, 4, "默认应开 4 条数据流，实际 {}", sent.streams);
+    assert_eq!(r.streams_used, 4, "接收端报告的数据流数应与协商一致");
+    assert!(r.verified, "多流乱序落盘后仍须通过全量校验");
+    assert_eq!(
+        hash_bytes(&fs::read(dest.join("src/big.bin")).unwrap()),
+        hash_bytes(&data),
+        "多流拼回的内容必须与源文件一致"
+    );
+}

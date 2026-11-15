@@ -224,6 +224,7 @@ fn stray_data_hello_is_rejected() {
         &mut s,
         &Control::DataHello {
             txn_id: "ghost".into(),
+            stream: 0,
         },
     )
     .unwrap();
@@ -264,6 +265,7 @@ fn duplicate_destination_is_rejected_then_reusable() {
         &mut data,
         &Control::DataHello {
             txn_id: "txn-claim".into(),
+            stream: 0,
         },
     )
     .unwrap();
@@ -396,6 +398,7 @@ fn single_session_rejects_second_device_explicitly() {
         &mut data,
         &Control::DataHello {
             txn_id: "txn-first".into(),
+            stream: 0,
         },
     )
     .unwrap();

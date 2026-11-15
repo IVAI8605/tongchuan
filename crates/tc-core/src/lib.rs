@@ -24,12 +24,14 @@ pub use frame::{FrameHeader, FrameType, BLOCK_SIZE};
 pub use manifest::{build_manifest, build_manifest_with_progress, DeviceInfo, FileEntry, Manifest, Root};
 pub use session::{
     protocol_compatible, run_receiver, run_receiver_on, run_receiver_with,
-    run_receiver_with_gate, run_receiver_with_store, run_receiver_with_store_gate, run_sender,
+    run_receiver_with_gate, run_receiver_with_gate_streams, run_receiver_with_store,
+    run_receiver_with_store_gate, run_receiver_with_store_gate_streams, run_receiver_with_streams,
+    run_sender,
     run_sender_with, run_sender_with_device, run_sender_with_device_control,
     run_sender_with_device_control_opts, run_sender_with_device_progress, run_sender_with_opts,
     validate_manifest_paths, GateVerdict, HubReport, PathClaims, ReceiverHub,
     ReceiverReport, SendControl, SendOptions, SendProgress, SendReport, TrustGate, TrustMode,
-    PROTOCOL_VERSION,
+    DEFAULT_STREAMS, PROTOCOL_VERSION,
 };
 pub use store::{PartFile, PathStore, Store};
 pub use tls::{client_config, client_config_with_identity, server_config, Identity};

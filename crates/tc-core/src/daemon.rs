@@ -66,6 +66,9 @@ pub struct Config {
     /// 管理页「浏览…」的根目录白名单（v0.13.3）。非空时只列这些目录，且只能在其中浏览；
     /// 空 = 按旧行为列盘符（Windows）或 `/`。NAS 上配好后管理页就不会翻到系统目录。
     pub browse_roots: Vec<PathBuf>,
+    /// 单会话的并行数据流数（v0.15）。1 = 关闭；上限 8。
+    /// 只在链路单流吃不满时才有收益（典型是 Wi-Fi），有线千兆以上可以按实测调。
+    pub streams: usize,
 }
 
 impl Default for Config {
@@ -94,6 +97,8 @@ impl Default for Config {
             clip_listen: String::new(),
             // 缺省不限制：Windows 直接列盘符，与旧行为一致；NAS 建议显式配置
             browse_roots: Vec::new(),
+            // 4 条流：Wi-Fi 上单流通常吃不满链路，4 条实测收益明显；有线链路按需调小
+            streams: 4,
         }
     }
 }
