@@ -176,7 +176,6 @@ public class MainActivity extends Activity {
         // 否则必须退出重进 Activity 才出现，等于把批准入口藏起来了
         Button refreshBtn = button("刷新状态", v -> {
             refresh();
-            refreshTrust();
         });
         addWeighted(recvRow1, refreshBtn, false);
         devicePanel.addView(recvRow1);
@@ -1790,6 +1789,11 @@ public class MainActivity extends Activity {
         // 合成按钮的文案跟着真实状态走；启停进行中保持「正在…」，别在两个状态之间闪
         if (recvToggleBtn != null && !recvPending) {
             recvToggleBtn.setText(ReceiverService.isRunning() ? "停止常驻接收" : "启动常驻接收");
+        }
+        // v0.17.1：状态刷新统一带上信任列表。之前只有「刷新状态」按钮单独补刷，
+        // 服务启停、回到前台等入口只刷状态，被拒后的「待确认」要退出重进才看得到。
+        if (devicePanel != null && devicePanel.getVisibility() == ViewGroup.VISIBLE) {
+            refreshTrust();
         }
     }
 

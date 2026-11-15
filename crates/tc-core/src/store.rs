@@ -331,7 +331,7 @@ impl PartFile {
     pub fn finalize(&mut self, final_path: &Path) -> io::Result<PathBuf> {
         let target = unique_path(final_path);
         fs::rename(&self.path, &target)?;
-        self.mark_done()?;
+        self.drop_map()?;
         Ok(target)
     }
 
@@ -352,7 +352,7 @@ impl PartFile {
         } else {
             fs::rename(&self.path, final_path)?;
         }
-        self.mark_done()?;
+        self.drop_map()?;
         Ok(final_path.to_path_buf())
     }
 
@@ -362,16 +362,21 @@ impl PartFile {
         if let Some(f) = self.file.as_mut() {
             f.sync_all()?;
         }
-        self.mark_done()
+        self.drop_map()
     }
 
-    fn mark_done(&mut self) -> io::Result<()> {
-        // 位图不删（用户数据/审计一律不彻底删除），改成 DONE 标记，
-        // 下次同名传输时 open() 会因解析失败而按全新会话重建，不会误续到旧进度。
-        // 先释放追加句柄再覆盖：Windows 下同一文件还有句柄时 fs::write 会失败（分享冲突）。
+    /// v0.17.1：成功后把位图删掉，不在用户目录里留 `.tcpart.map`。
+    /// 这是程序自己生成的临时元数据，不是用户文件；删除失败不阻断交付（数据已经改名落盘），
+    /// 只把错误交给调用方决定是否记日志。
+    fn drop_map(&mut self) -> io::Result<()> {
         self.map_file = None;
-        fs::write(&self.map_path, "DONE")
+        match fs::remove_file(&self.map_path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
+
 }
 
 /// 接收端落盘后端。
@@ -513,7 +518,7 @@ mod tests {
         p.verify(&entry).unwrap();
         p.finish_in_place().unwrap();
         assert_eq!(fs::read(&target).unwrap(), vec![7u8; 16]);
-        assert_eq!(read_map_text(&map).unwrap(), "DONE");
+        assert!(!map.exists(), "v0.17.1：SAF 完成路径也不应留下位图");
     }
 
     /// 位图改成追加写后：行数应等于写入次数（含重复块），集合仍按唯一块号算。
@@ -623,7 +628,7 @@ mod tests {
             p.write_block(0, &vec![7u8; BLOCK_SIZE]).unwrap();
             p.finalize(&dir.join("final.bin")).unwrap();
         }
-        assert_eq!(read_map_text(&map).unwrap(), "DONE");
+        assert!(!map.exists(), "v0.17.1：成功后不应残留 .tcpart.map");
         // 数据文件已被 rename 走；同名再来一次时应按全新会话重建，不能读成已收 0 块
         let p = PartFile::open(&dest, &entry).unwrap();
         assert_eq!(p.missing().len(), 3);
