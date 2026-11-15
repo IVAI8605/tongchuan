@@ -92,14 +92,18 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
       <label><input type="checkbox" id="sendForce"> 忽略接收端已有文件，本次全部重传（同名旧文件改名让位，不删除）</label>
     </div>
   </div>
-  <div id="browse" style="display:none;margin-top:12px">
-    <div class="row">
-      <div class="item" style="flex:1"><span class="label">当前目录</span><div class="value" id="browsePath">—</div></div>
+  <div id="browseMask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:50"></div>
+  <div id="browse" style="display:none;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(560px,92vw);max-height:82vh;overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;box-shadow:0 18px 50px rgba(0,0,0,.25);z-index:51">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <strong style="font-size:15px">选择目录</strong>
+      <button id="browseClose" style="margin-left:auto">关闭</button>
+    </div>
+    <div class="hint" id="browsePath" style="margin-bottom:8px">—</div>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
       <button id="browseUp">上级</button>
       <button id="browsePick">选这个目录</button>
-      <button id="browseClose">收起</button>
     </div>
-    <div id="browseList" style="max-height:220px;overflow:auto;margin-top:10px"></div>
+    <div id="browseList" style="max-height:52vh;overflow:auto"></div>
   </div>
   <p class="hint" id="sendMsg">选好设备与目录后点发送；重复发送同一目录时，接收端会按内容跳过已经有的文件。</p>
   <p class="hint" id="sendProgress" style="display:none"></p>
@@ -250,10 +254,10 @@ function loadTargets(){
 }
 function browse(p){
   var box=document.getElementById('browse')
-  // 面板在发送区下方，点完不滚过去用户会以为按钮没反应（v0.13.1 修）
+  // v0.13.6：目录树改成弹窗，打开时同时铺一层遮罩，点遮罩即关闭
+  document.getElementById('browseMask').style.display='block'
   box.style.display='block'
   fill('browsePath','正在读取…')
-  try{box.scrollIntoView({block:'nearest'})}catch(e){}
   fetch('/api/fs?path='+encodeURIComponent(p||'')).then(function(r){return r.json()}).then(function(j){
     if(j.error){fill('browsePath','读取失败');fill('sendMsg','目录读取失败：'+j.error+'（可直接在输入框手输路径）');return}
     browseCur=j.path||''
@@ -266,9 +270,13 @@ function browse(p){
     el.innerHTML=ds.length?ds.map(function(d){
       // 后端给了显示名就用它（盘符会带卷标，如「D: 仓库」），否则退回路径最后一段
       var name=(j.labels&&j.labels[d])?j.labels[d]:(d.replace(/[\\/]+$/,'').split(/[\\/]/).pop()||d)
-      return '<div style="margin:4px 0"><button data-dir="'+esc(d)+'" style="background:var(--accent-soft);color:var(--ink)">'+esc(name)+'</button></div>'
+      return '<div style="margin:4px 0"><button data-dir="'+esc(d)+'" style="width:100%;text-align:left;background:var(--accent-soft);color:var(--ink)">'+esc(name)+'</button></div>'
     }).join(''):'<p class="empty">没有子目录</p>'
   }).catch(function(){fill('browsePath','读取失败');fill('sendMsg','目录读取失败，可直接在输入框手输路径')})
+}
+function closeBrowse(){
+  document.getElementById('browse').style.display='none'
+  document.getElementById('browseMask').style.display='none'
 }
 function startSend(addr,fp,path,force){
   lastSend={addr:addr,fp:fp,path:path,force:!!force}
@@ -314,13 +322,12 @@ document.getElementById('sendReload').addEventListener('click',function(){
 document.getElementById('sendBrowse').addEventListener('click',function(){
   browse(document.getElementById('sendPath').value.trim())
 })
-document.getElementById('browseClose').addEventListener('click',function(){
-  document.getElementById('browse').style.display='none'
-})
+document.getElementById('browseClose').addEventListener('click',closeBrowse)
+document.getElementById('browseMask').addEventListener('click',closeBrowse)
 document.getElementById('browseUp').addEventListener('click',function(){browse(browseParent)})
 document.getElementById('browsePick').addEventListener('click',function(){
   document.getElementById('sendPath').value=browseCur
-  document.getElementById('browse').style.display='none'
+  closeBrowse()
 })
 document.getElementById('browseList').addEventListener('click',function(e){
   var b=e.target.closest('button[data-dir]');if(!b)return
@@ -548,9 +555,14 @@ fn list_dirs(path: &str, roots: &[PathBuf]) -> io::Result<serde_json::Value> {
         for entry in fs::read_dir(&base)? {
             let entry = entry?;
             // 跟随符号链接会跳出用户当前所在的树；只认真正的目录项
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                dirs.push(entry.path().display().to_string());
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
             }
+            // v0.13.6：隐藏目录不列。管理页是给用户选发送目录的，不是文件管理器
+            if is_hidden_dir(&entry.path()) {
+                continue;
+            }
+            dirs.push(entry.path().display().to_string());
         }
         (base.display().to_string(), parent)
     };
@@ -567,6 +579,44 @@ fn within_roots(path: &Path, roots: &[PathBuf]) -> bool {
         let r = r.canonicalize().unwrap_or_else(|_| r.clone());
         p == r || p.starts_with(&r)
     })
+}
+
+/// v0.13.6：隐藏目录不进目录树。
+/// Unix 看名字前缀；Windows 再看隐藏属性——`System Volume Information` 这类没有点前缀，只能靠属性识别。
+fn is_hidden_dir(path: &Path) -> bool {
+    if let Some(name) = path.file_name() {
+        if name.to_string_lossy().starts_with('.') {
+            return true;
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Some(attrs) = file_attributes(path) {
+            return attrs & 0x2 != 0; // FILE_ATTRIBUTE_HIDDEN
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+fn file_attributes(path: &Path) -> Option<u32> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetFileAttributesW(name: *const u16) -> u32;
+    }
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let a = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    // INVALID_FILE_ATTRIBUTES = u32::MAX
+    if a == u32::MAX {
+        None
+    } else {
+        Some(a)
+    }
 }
 
 /// 取 Windows 盘符的卷标名；取不到（未格式化、无权限）就返回 None，不影响目录列表。
