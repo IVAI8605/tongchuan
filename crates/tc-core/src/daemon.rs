@@ -310,6 +310,8 @@ pub struct DaemonState {
     pub history: Mutex<Vec<HistoryEntry>>,
     /// 管理页的发送任务（最近一次）。页面按它渲染进度与失败原因。
     pub send_job: Mutex<Option<SendJob>>,
+    /// v0.20：二维码一次性令牌。管理页生成/作废，接收端门禁消费，必须是同一个实例。
+    pub pair: Arc<crate::pair::PairTokens>,
     /// 当前生效的日志级别（log_level_rank 的数值）。
     /// 用原子量而不是每次读 config 锁：log() 会在若干已持锁的路径里被调用，
     /// 再取 config 锁有自锁风险。
@@ -344,6 +346,7 @@ impl DaemonState {
             log_lines: Mutex::new(Vec::new()),
             history: Mutex::new(Vec::new()),
             send_job: Mutex::new(None),
+            pair: Arc::new(crate::pair::PairTokens::new()),
             log_level: AtomicU8::new(rank.unwrap_or(2)),
             log_max_bytes: AtomicU64::new(max_bytes),
         };

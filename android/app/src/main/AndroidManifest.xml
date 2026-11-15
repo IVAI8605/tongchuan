@@ -21,6 +21,10 @@
     <!-- 自用侧载，不走上架审核：拿到「所有文件访问」后就能按真实路径写用户选的目录，
          既不用把文件塞进相册，也不用为了一个落点去写整套 SAF fd 适配 -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- v0.20 扫码配对：只在用户点「扫二维码」时申请，拒绝也不影响手动发现与发送 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- 相机不是必需硬件：没有相机的设备照样能装，只是用不了扫码这一条路 -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
         android:allowBackup="false"
@@ -51,6 +55,12 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+
+        <!-- v0.20 扫码配对页：不对外导出，只能由本应用发起 -->
+        <activity
+            android:name=".ScanActivity"
+            android:exported="false"
+            android:label="扫二维码" />
 
         <service
             android:name=".ReceiverService"

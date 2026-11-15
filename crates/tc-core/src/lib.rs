@@ -10,6 +10,7 @@ pub mod hash;
 pub mod hashcache;
 pub mod history;
 pub mod manifest;
+pub mod pair;
 pub mod pathsafe;
 pub mod queue;
 pub mod retry;
@@ -24,6 +25,9 @@ pub mod web;
 pub use frame::{FrameHeader, FrameType, BLOCK_SIZE};
 pub use hashcache::HashCache;
 pub use manifest::{build_manifest, build_manifest_with_progress, DeviceInfo, FileEntry, Manifest, Root};
+pub use pair::{
+    local_lan_addr, qr_svg, ActiveToken, ConsumeResult, PairPayload, PairTokens, PAIR_TTL_SECS,
+};
 pub use session::{
     list_destinations, list_destinations_for, protocol_compatible, run_receiver, run_receiver_on,
     run_receiver_with, run_receiver_with_gate, run_receiver_with_gate_streams,

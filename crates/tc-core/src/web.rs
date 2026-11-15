@@ -131,6 +131,21 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
 </section>
 
 <section>
+  <h2>配对（扫码）</h2>
+  <p class="hint">让对方用手机「扫二维码」直接配对，扫完就能发文件，不必再在信任表里手动批准。</p>
+  <div class="row">
+    <div class="item" style="flex:1"><span class="label">本机地址（自动判断，多网卡时改成对方能连到的那个）</span><input type="text" id="pairAddr" style="width:100%" placeholder="例如 192.168.1.23:53318"></div>
+    <button id="pairGen">生成二维码</button>
+    <button id="pairRevoke">立即作废</button>
+  </div>
+  <div id="pairBox" class="mt" style="display:none">
+    <div id="pairQr" style="width:224px;height:224px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px"></div>
+    <p class="hint" id="pairInfo">—</p>
+  </div>
+  <p class="hint" id="pairMsg">尚未生成二维码。有效期 10 分钟，只能配一台设备；关闭本页不影响它继续可用。</p>
+</section>
+
+<section>
   <h2>设置</h2>
   <div class="row">
     <div class="item"><span class="label">设备别名</span><input type="text" id="setAlias"></div>
@@ -343,7 +358,49 @@ document.getElementById('sendGo').addEventListener('click',function(){
 document.getElementById('sendRetry').addEventListener('click',function(){
   if(lastSend)startSend(lastSend.addr,lastSend.fp,lastSend.path,lastSend.force)
 })
-status();history();logs();trust();loadTargets();sendStatus()
+// ---- 配对二维码（v0.20）：生成、倒计时、作废 ----
+var pairTimer=null,pairExpires=0
+function pairTick(){
+  var left=Math.max(0,Math.floor(pairExpires-Math.floor(Date.now()/1000)))
+  var m=Math.floor(left/60),s=left%60
+  fill('pairInfo',left>0?('剩余 '+m+':'+('0'+s).slice(-2)+' · 一次性，扫过一次就失效'):'已过期，请重新生成')
+}
+function pairRender(j){
+  var box=document.getElementById('pairBox')
+  if(!j||!j.active){
+    box.style.display='none'
+    fill('pairMsg',(j&&j.reason)?j.reason:'当前没有有效二维码')
+    return
+  }
+  document.getElementById('pairAddr').value=j.addr
+  document.getElementById('pairQr').innerHTML=j.svg
+  pairExpires=j.expires
+  box.style.display='block'
+  pairTick()
+  if(pairTimer)clearInterval(pairTimer)
+  pairTimer=setInterval(pairTick,1000)
+}
+function pairLoad(){
+  fetch('/api/pair').then(function(r){return r.json()}).then(pairRender)
+    .catch(function(){fill('pairMsg','配对接口不可用')})
+}
+document.getElementById('pairGen').addEventListener('click',function(){
+  var addr=document.getElementById('pairAddr').value.trim()
+  fetch('/api/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({addr:addr})})
+    .then(function(r){return r.json()}).then(function(j){
+      if(j.ok){fill('pairMsg','二维码已生成，旧码已失效；给对方扫即可');pairRender(j)}
+      else{fill('pairMsg','生成失败：'+(j.reason||'未知原因'))}
+    }).catch(function(){fill('pairMsg','请求失败')})
+})
+document.getElementById('pairRevoke').addEventListener('click',function(){
+  fetch('/api/pair/revoke',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+    .then(function(r){return r.json()}).then(function(j){
+      document.getElementById('pairBox').style.display='none'
+      if(pairTimer){clearInterval(pairTimer);pairTimer=null}
+      fill('pairMsg',j.ok?'二维码已作废，任何人都不能再凭它配对':'作废失败')
+    }).catch(function(){fill('pairMsg','请求失败')})
+})
+status();history();logs();trust();loadTargets();sendStatus();pairLoad()
 setInterval(status,3000);setInterval(function(){history();logs();trust()},10000);setInterval(sendStatus,1000)
 </script>
 </body>
@@ -908,6 +965,104 @@ fn route(
                 ),
             }
         }
+        // v0.20 配对二维码：GET 查看当前有效码，POST 生成新码（旧码立即失效）。
+        // 地址以页面传入的为准（多网卡/NAS 多网口时自动判断可能挑错网卡）。
+        ("GET", "/api/pair") | ("POST", "/api/pair") => {
+            if method == "POST" && !limit.allow() {
+                return (429, "text/plain", b"too many requests".to_vec());
+            }
+            let (listen, alias) = {
+                let cfg = state.config.lock().expect("config poisoned");
+                (cfg.listen.clone(), cfg.alias.clone())
+            };
+            let port = listen.rsplit(':').next().unwrap_or("53318").to_string();
+            let given = if method == "POST" {
+                serde_json::from_slice::<serde_json::Value>(body)
+                    .ok()
+                    .and_then(|v| v.get("addr").and_then(|x| x.as_str()).map(|s| s.trim().to_string()))
+                    .unwrap_or_default()
+            } else {
+                query_value(query, "addr").trim().to_string()
+            };
+            let addr = if !given.is_empty() {
+                given
+            } else {
+                // 自动判断失败时宁可报错让人手填，也不能把 127.0.0.1 或猜测的地址写进二维码
+                match crate::pair::local_lan_addr() {
+                    Some(ip) => format!("{ip}:{port}"),
+                    None => String::new(),
+                }
+            };
+            if addr.is_empty() {
+                return json(&serde_json::json!({
+                    "ok": false,
+                    "active": false,
+                    "reason": "无法自动判断本机局域网地址，请在上方手填（例如 192.168.1.23:53318）"
+                }));
+            }
+            let token = if method == "POST" {
+                match state.pair.issue() {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        state.log("error", &format!("生成配对令牌失败: {e}"));
+                        return (
+                            500,
+                            "application/json",
+                            serde_json::to_vec(&serde_json::json!({ "ok": false, "reason": e.to_string() }))
+                                .unwrap_or_else(|_| b"{}".to_vec()),
+                        );
+                    }
+                }
+            } else {
+                state.pair.active()
+            };
+            match token {
+                Some(t) => {
+                    let payload = crate::pair::PairPayload {
+                        addr: addr.clone(),
+                        fp: fingerprint.to_string(),
+                        code: t.token.clone(),
+                        exp: t.expires,
+                        name: alias,
+                    };
+                    match crate::pair::qr_svg(&payload.encode(), 224) {
+                        Ok(svg) => {
+                            if method == "POST" {
+                                // 只记地址与有效期，令牌本身绝不入日志
+                                state.log(
+                                    "info",
+                                    &format!("已生成配对二维码：{addr}，{} 秒内有效", t.ttl),
+                                );
+                            }
+                            json(&serde_json::json!({
+                                "ok": true,
+                                "active": true,
+                                "addr": addr,
+                                "expires": t.expires,
+                                "ttl": t.ttl,
+                                "remaining": (t.expires - now_secs()).max(0),
+                                "svg": svg,
+                            }))
+                        }
+                        Err(e) => {
+                            state.log("error", &format!("渲染配对二维码失败: {e}"));
+                            (
+                                500,
+                                "application/json",
+                                serde_json::to_vec(&serde_json::json!({ "ok": false, "reason": e.to_string() }))
+                                    .unwrap_or_else(|_| b"{}".to_vec()),
+                            )
+                        }
+                    }
+                }
+                None => json(&serde_json::json!({ "ok": true, "active": false })),
+            }
+        }
+        ("POST", "/api/pair/revoke") => {
+            let revoked = state.pair.revoke();
+            state.log("info", "管理页作废了配对二维码");
+            json(&serde_json::json!({ "ok": true, "revoked": revoked }))
+        }
         ("GET", "/api/trust") => {
             let mode = state.config.lock().expect("config poisoned").trust_mode.clone();
             // 读文件失败时不能把整页拖成 500：返回空表并留日志，用户至少还能看到模式
@@ -1221,6 +1376,64 @@ mod tests {
         let (code, _, _) = call(&st, "POST", "/api/send", payload.as_bytes(), "fp", &lim);
         assert_eq!(code, 400);
         assert!(st.send_job.lock().unwrap().is_none(), "被拒绝的请求不该留下任务");
+    }
+
+    /// v0.20：配对二维码的生成、查看与作废。
+    /// 关键点：POST 会换新码（旧码立刻失效），GET 不能换码，作废后不再返回二维码。
+    #[test]
+    fn pair_qr_endpoint_issues_rotates_and_revokes() {
+        let (st, lim) = fixture("pair");
+        let (code, _, body) = call(
+            &st,
+            "POST",
+            "/api/pair",
+            br#"{"addr":"192.168.1.9:53318"}"#,
+            "fp-pair",
+            &lim,
+        );
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["active"], true);
+        assert_eq!(v["addr"], "192.168.1.9:53318");
+        assert!(v["svg"].as_str().unwrap().contains("<svg"));
+        let first_exp = v["expires"].as_i64().unwrap();
+        let first_code = st.pair.active().unwrap().token;
+
+        // GET 只是查看，必须沿用同一次性令牌
+        let (_, _, body) = call(&st, "GET", "/api/pair", b"", "fp-pair", &lim);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["active"], true);
+        assert_eq!(v["expires"].as_i64().unwrap(), first_exp);
+        assert_eq!(st.pair.active().unwrap().token, first_code);
+
+        // 再次 POST 是「重新生成」：旧码必须作废
+        let (_, _, _) = call(
+            &st,
+            "POST",
+            "/api/pair",
+            br#"{"addr":"192.168.1.9:53318"}"#,
+            "fp-pair",
+            &lim,
+        );
+        let second = st.pair.active().unwrap().token;
+        assert_ne!(first_code, second);
+
+        let (_, _, body) = call(&st, "POST", "/api/pair/revoke", b"{}", "fp-pair", &lim);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ok"], true);
+        assert!(st.pair.active().is_none());
+        let (_, _, body) = call(&st, "GET", "/api/pair", b"", "fp-pair", &lim);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["active"], false);
+    }
+
+    /// 配对的页面区块与脚本必须真的在页面上，不能只写了后端接口。
+    #[test]
+    fn page_contains_pair_section() {
+        assert!(PAGE.contains("配对（扫码）"));
+        assert!(PAGE.contains("/api/pair"));
+        assert!(PAGE.contains("立即作废"));
     }
 
     #[test]

@@ -94,4 +94,22 @@ public final class TcNative {
      */
     public static native String clipPushJson(String identityDir, String target, String peerFp,
                                              String text, boolean sensitive, String deviceName);
+
+    // ---- v0.20 二维码配对 ----
+    // 令牌表在 Rust 侧与接收端门禁共享，所以界面上的「立即作废」对门禁立刻生效。
+
+    /** 生成一张 10 分钟、一次性的配对二维码。addr 留空时由内核自动探测本机局域网地址。 */
+    public static native String pairIssue(String identityDir, String addr, String name);
+
+    /** 查看当前有效码（不换码）；没有有效码时 active=false。 */
+    public static native String pairStatus(String identityDir, String addr, String name);
+
+    /** 立即作废当前码。 */
+    public static native String pairRevoke(String identityDir);
+
+    /**
+     * 解析扫到的二维码文本，校验规则与桌面端同一份实现。
+     * 返回 {"ok":true,"addr","fp","code","exp","name","remaining","expired","hint"}。
+     */
+    public static native String pairParse(String text);
 }

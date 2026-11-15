@@ -37,6 +37,8 @@ public class MainActivity extends Activity {
     private static final int REQ_TREE = 100;
     private static final int REQ_SEND_FILES = 101;
     private static final int REQ_SEND_TREE = 102;
+    /** v0.20 扫码配对：从 ScanActivity 拿回二维码文本 */
+    private static final int REQ_SCAN = 103;
     /** v0.13.4：配对码并入后统一的面板标题，展开/收起文案都从这里取 */
     private static final String DEVICE_TITLE = "设备与保活（发现、授权、信任、配对码）";
 
@@ -211,6 +213,9 @@ public class MainActivity extends Activity {
         addWeighted(recvRow2, grantBtn, false);
         devicePanel.addView(recvRow2);
 
+        // v0.20：出码本身属于「接收端动作」，放在常驻开关这一组里最顺手
+        devicePanel.addView(button("配对二维码（让对方扫）", v -> showPairDialog()));
+
         // 保活两项：常驻自动开启后仍然保留手动入口，方便用户重新开启或去系统里关掉
         LinearLayout keepAliveBox = new LinearLayout(this);
         keepAliveBox.setOrientation(LinearLayout.HORIZONTAL);
@@ -303,6 +308,10 @@ public class MainActivity extends Activity {
         addWeighted(pickRow, pickFilesBtn, true);
         addWeighted(pickRow, pickFolderBtn, false);
         sendCard.addView(pickRow);
+
+        // v0.20：扫码配对。对方手机出码，这边扫一次就填好目标与令牌，
+        // 不用先等发现报文，也不会选错设备
+        sendCard.addView(button("扫二维码配对", v -> openScanner()));
 
         // v0.12：强制重传——接收端有同内容文件时也重传一遍，
         // 目标位置的同名旧文件改名让位（只改名不删除）
@@ -417,8 +426,10 @@ public class MainActivity extends Activity {
 
         // v0.13.4：配对码与本机指纹并入「设备与保活」，放在面板末尾
         pairInput = new android.widget.EditText(this);
-        pairInput.setHint("配对码（可选，6 位数字）");
-        pairInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        // v0.20：扫码得到的是一次性令牌（10 位字母数字），不再是纯数字配对码，
+        // 所以输入类型改成文本；手输 6 位静态码照样能用。
+        pairInput.setHint("配对码 / 一次性令牌（扫码后自动填入）");
+        pairInput.setInputType(InputType.TYPE_CLASS_TEXT);
         pairInput.setTextSize(14);
         pairInput.setPadding(0, dp(12), 0, dp(2));
         devicePanel.addView(pairInput);
@@ -736,6 +747,11 @@ public class MainActivity extends Activity {
             pickedPaths.clear();
             pickedPaths.add(p);
             updatePickedLabel(0);
+            return;
+        }
+        // ---- 发送：扫二维码配对（v0.20）----
+        if (requestCode == REQ_SCAN) {
+            handleScanResult(data.getStringExtra(ScanActivity.EXTRA_RESULT));
             return;
         }
         if (requestCode != REQ_TREE || data.getData() == null) {
@@ -1066,6 +1082,264 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             android.widget.Toast.makeText(this, "打不开目录选择器：" + e.getMessage(),
                     android.widget.Toast.LENGTH_LONG).show();
+        }
+    }
+
+    // ---- v0.20 二维码配对：出码（接收端）与扫码（发送端）----
+
+    private void openScanner() {
+        try {
+            startActivityForResult(new Intent(this, ScanActivity.class), REQ_SCAN);
+        } catch (Exception e) {
+            android.widget.Toast.makeText(this, "打不开扫码页：" + e.getMessage(),
+                    android.widget.Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** 扫码结果：解析与校验都在 Rust 里做，这里只负责把目标与令牌填进界面。 */
+    private void handleScanResult(String payload) {
+        if (payload == null || payload.isEmpty()) {
+            return;
+        }
+        JSONObject o;
+        try {
+            String parsed = TcNative.pairParse(payload);
+            o = new JSONObject(parsed == null ? "{}" : parsed);
+        } catch (Exception e) {
+            android.widget.Toast.makeText(this, "二维码解析失败",
+                    android.widget.Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (!o.optBoolean("ok")) {
+            android.widget.Toast.makeText(this,
+                    "这不是通传的配对二维码：" + o.optString("reason", "无法识别"),
+                    android.widget.Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (o.optBoolean("expired")) {
+            android.widget.Toast.makeText(this, "二维码已过期，请让对方重新生成",
+                    android.widget.Toast.LENGTH_LONG).show();
+            return;
+        }
+        String addr = o.optString("addr");
+        String fp = o.optString("fp");
+        String code = o.optString("code");
+        String name = o.optString("name");
+        // 令牌先填：紧随其后的落点查询会带它走同一场 TLS 会话，
+        // 接收端据此直接把这台设备记进信任表
+        if (pairInput != null) {
+            pairInput.setText(code);
+        }
+        applyScannedPeer(addr, fp, name);
+        String hint = o.optString("hint", "");
+        String label = name.isEmpty() ? addr : name;
+        android.widget.Toast.makeText(this,
+                "已配对：" + label + (hint.isEmpty() ? "，选好文件即可发送" : "（" + hint + "）"),
+                android.widget.Toast.LENGTH_LONG).show();
+    }
+
+    /** 扫码得到的目标直接覆盖已选列表并落盘：下次进应用默认还是它。 */
+    private void applyScannedPeer(String addr, String fp, String name) {
+        selectedPeers.clear();
+        selectedPeers.add(new String[]{addr, fp, name});
+        targetAddr = addr;
+        targetFp = fp;
+        targetName = name;
+        getSharedPreferences(Dest.PREFS, MODE_PRIVATE).edit()
+                .putString("send_addr", addr)
+                .putString("send_fp", fp)
+                .putString("send_name", name)
+                .apply();
+        updateTargetLabel();
+    }
+
+    /**
+     * 出码对话框。先看有没有仍然有效的码：关掉窗口不等于撤销，
+     * 重新打开时沿用同一张，避免用户只是切了一下界面就把对方的码作废。
+     */
+    private void showPairDialog() {
+        // 出码意味着「我现在能接收」；常驻没开就顺手拉起，免得对方扫完却连不上
+        if (!ReceiverService.isRunning()) {
+            ensureNotificationPermission();
+            setWantRunning(true);
+            recvPending = true;
+            recvToggleBtn.setText("正在启动…");
+            status.setText("常驻：正在启动…（等待端口就绪）");
+            status.setTextColor(COLOR_WARN);
+            ReceiverService.start(this);
+            waitRecvState(true);
+        }
+        final String dir = ReceiverService.identityDir(this).getAbsolutePath();
+        final String name = "手机-" + Build.MODEL;
+        final android.content.SharedPreferences prefs =
+                getSharedPreferences(Dest.PREFS, MODE_PRIVATE);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(12), dp(20), dp(4));
+
+        TextView tip = new TextView(this);
+        tip.setTextSize(13);
+        tip.setTextColor(COLOR_MUTED);
+        tip.setText("让对方打开通传 →「扫二维码配对」扫这张码，扫到后直接发文件。"
+                + "有效期 10 分钟，只能配一台设备；关掉这个窗口不影响它继续可用。");
+        box.addView(tip);
+
+        final android.widget.ImageView qrView = new android.widget.ImageView(this);
+        qrView.setAdjustViewBounds(true);
+        LinearLayout.LayoutParams qlp = new LinearLayout.LayoutParams(dp(220), dp(220));
+        qlp.gravity = Gravity.CENTER_HORIZONTAL;
+        qlp.topMargin = dp(12);
+        qrView.setLayoutParams(qlp);
+        box.addView(qrView);
+
+        final TextView info = new TextView(this);
+        info.setTextSize(13);
+        info.setTextColor(COLOR_ACCENT);
+        info.setGravity(Gravity.CENTER);
+        info.setPadding(0, dp(8), 0, dp(8));
+        info.setText("准备中…");
+        box.addView(info);
+
+        final android.widget.EditText addrInput = new android.widget.EditText(this);
+        addrInput.setHint("本机地址（自动判断，可改成对方能连到的那个）");
+        addrInput.setTextSize(13);
+        addrInput.setText(prefs.getString("pair_addr", ""));
+        box.addView(addrInput);
+
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button regenBtn = button("重新生成", null);
+        Button revokeBtn = button("立即作废", null);
+        addWeighted(btnRow, regenBtn, true);
+        addWeighted(btnRow, revokeBtn, false);
+        box.addView(btnRow);
+
+        final android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(this)
+                .setTitle("配对二维码").setView(box).setPositiveButton("关闭", null).create();
+        final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        final long[] expires = {0};
+        final Runnable[] tick = new Runnable[1];
+        tick[0] = () -> {
+            long left = Math.max(0, expires[0] - System.currentTimeMillis() / 1000);
+            if (left <= 0) {
+                info.setTextColor(COLOR_WARN);
+                info.setText("已过期，请点「重新生成」");
+                return;
+            }
+            info.setTextColor(COLOR_ACCENT);
+            info.setText(String.format(Locale.CHINA, "剩余 %d:%02d · 一次有效",
+                    left / 60, left % 60));
+            h.postDelayed(tick[0], 1000);
+        };
+        // 出码 / 停码都要在后台线程做：JNI 里要读身份文件与系统随机数，别卡住界面
+        final Runnable[] issue = new Runnable[1];
+        issue[0] = () -> {
+            final String addr = addrInput.getText().toString().trim();
+            prefs.edit().putString("pair_addr", addr).apply();
+            new Thread(() -> {
+                final String json = TcNative.pairIssue(dir, addr, name);
+                runOnUiThread(() -> {
+                    if (renderPairJson(json, qrView, info, addrInput, expires)) {
+                        h.removeCallbacks(tick[0]);
+                        h.post(tick[0]);
+                    }
+                });
+            }, "tc-pair").start();
+        };
+        regenBtn.setOnClickListener(v -> issue[0].run());
+        revokeBtn.setOnClickListener(v -> new Thread(() -> {
+            TcNative.pairRevoke(dir);
+            runOnUiThread(() -> {
+                h.removeCallbacks(tick[0]);
+                expires[0] = 0;
+                qrView.setImageDrawable(null);
+                info.setTextColor(COLOR_WARN);
+                info.setText("已作废：任何设备都不能再凭这张码配对");
+            });
+        }, "tc-pair").start());
+
+        new Thread(() -> {
+            final String saved = prefs.getString("pair_addr", "");
+            String st = TcNative.pairStatus(dir, saved, name);
+            boolean active = st != null && st.contains("\"active\":true");
+            final String json = active ? st : TcNative.pairIssue(dir, saved, name);
+            runOnUiThread(() -> {
+                if (renderPairJson(json, qrView, info, addrInput, expires)) {
+                    h.removeCallbacks(tick[0]);
+                    h.post(tick[0]);
+                }
+            });
+        }, "tc-pair").start();
+
+        // 扫屏时别让屏幕自己黑掉：倒计时在走、对方正对着扫
+        dlg.setOnShowListener(d -> {
+            if (dlg.getWindow() != null) {
+                dlg.getWindow().addFlags(
+                        android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+        });
+        // 关窗口只停止展示与倒计时，令牌留在接收端，10 分钟内仍可被扫
+        dlg.setOnDismissListener(d -> h.removeCallbacks(tick[0]));
+        dlg.show();
+    }
+
+    /** 把 Rust 返回的配对 JSON 画成二维码与倒计时状态。 */
+    private boolean renderPairJson(String json, android.widget.ImageView qrView, TextView info,
+                                   android.widget.EditText addrInput, long[] expires) {
+        try {
+            JSONObject o = new JSONObject(json == null ? "{}" : json);
+            if (!o.optBoolean("ok") || !o.optBoolean("active")) {
+                expires[0] = 0;
+                qrView.setImageDrawable(null);
+                info.setTextColor(COLOR_WARN);
+                info.setText(o.optString("reason", "当前没有有效二维码"));
+                return false;
+            }
+            String addr = o.optString("addr", "");
+            if (!addr.isEmpty()) {
+                addrInput.setText(addr);
+            }
+            android.graphics.Bitmap bmp = qrBitmap(o.optString("payload"), dp(220));
+            if (bmp == null) {
+                info.setTextColor(COLOR_ERR);
+                info.setText("二维码生成失败");
+                return false;
+            }
+            qrView.setImageBitmap(bmp);
+            expires[0] = o.optLong("expires");
+            return true;
+        } catch (Exception e) {
+            info.setTextColor(COLOR_ERR);
+            info.setText("二维码数据解析失败");
+            return false;
+        }
+    }
+
+    /** 用 zxing 把配对文本画成位图。M 级纠错：屏幕直扫，容得下轻微反光与摩尔纹。 */
+    private static android.graphics.Bitmap qrBitmap(String text, int size) {
+        if (text == null || text.isEmpty() || size <= 0) {
+            return null;
+        }
+        try {
+            java.util.Map<com.google.zxing.EncodeHintType, Object> hints =
+                    new java.util.EnumMap<>(com.google.zxing.EncodeHintType.class);
+            hints.put(com.google.zxing.EncodeHintType.CHARACTER_SET, "UTF-8");
+            hints.put(com.google.zxing.EncodeHintType.MARGIN, 1);
+            hints.put(com.google.zxing.EncodeHintType.ERROR_CORRECTION,
+                    com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.M);
+            com.google.zxing.common.BitMatrix m = new com.google.zxing.qrcode.QRCodeWriter()
+                    .encode(text, com.google.zxing.BarcodeFormat.QR_CODE, size, size, hints);
+            int[] px = new int[size * size];
+            for (int y = 0; y < size; y++) {
+                for (int x = 0; x < size; x++) {
+                    px[y * size + x] = m.get(x, y) ? Color.BLACK : Color.WHITE;
+                }
+            }
+            return android.graphics.Bitmap.createBitmap(
+                    px, size, size, android.graphics.Bitmap.Config.ARGB_8888);
+        } catch (Exception e) {
+            return null;
         }
     }
 

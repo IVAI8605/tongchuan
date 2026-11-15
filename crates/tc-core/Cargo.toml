@@ -14,6 +14,10 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 rustls-pki-types = "1"
 # v0.3 守护进程配置用 TOML；纯 Rust，无系统库依赖
 toml = "0.8"
+# v0.20 二维码配对：管理页把配对地址渲染成 SVG 直接内联进页面。
+# 只要 svg 特性，关掉默认的 image/pic——那会把整套图片编解码链带进二进制。
+# Android 侧不用它出图（那边用 zxing 直接出位图）。
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # 日志轮转要用本地时间给归档文件命名（daemon_YYYYMMDD-HHmm.log）。
 # rcgen 已间接依赖 time 且已编进构建，这里只是把它提到直接依赖；
 # local-offset 特性用来取本机时区偏移，取不到时回退 UTC。

@@ -50,3 +50,9 @@ android {
         checkReleaseBuilds = false
     }
 }
+
+dependencies {
+    // v0.20 二维码：只解码/编码，不带动整套相机 UI，预览由 ScanActivity 用 Camera2 自己做。
+    // 选 zxing core 而不是 zxing-android-embedded：后者会额外带一套 Activity 与资源。
+    implementation("com.google.zxing:core:3.5.3")
+}

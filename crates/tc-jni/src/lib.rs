@@ -25,6 +25,8 @@ use tc_core::SendControl;
 use tc_core::SendProgress;
 // P3：手机才是落盘入口，接收端必须和桌面一样走信任门禁，不能只靠 PC 侧把关
 use tc_core::{run_receiver_with_gate_streams, TrustGate, TrustMode, TrustStore};
+// v0.20 二维码配对：令牌表与接收端门禁必须是同一个实例，所以按 identity_dir 做进程级共享
+use tc_core::pair::{PairPayload, PairTokens};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static HANDLES: OnceLock<Mutex<HashMap<u64, Arc<Runtime>>>> = OnceLock::new();
@@ -122,6 +124,8 @@ fn handles() -> &'static Mutex<HashMap<u64, Arc<Runtime>>> {
 struct Runtime {
     stop: Arc<AtomicBool>,
     listen: String,
+    /// 停止时要顺带把该身份的配对令牌作废，不能留在内存里等人继续扫
+    identity_dir: String,
     /// 实际生效的信任策略，回给界面展示（Android 侧不提供 open 开关，排障改 PC 侧）
     trust_mode: String,
     sessions: AtomicU64,
@@ -151,6 +155,7 @@ pub fn start_receiver_with(config_json: &str, notifier: Option<Notifier>) -> Res
     let rt = Arc::new(Runtime {
         stop: stop.clone(),
         listen: cfg.listen.clone(),
+        identity_dir: cfg.identity_dir.to_string_lossy().to_string(),
         trust_mode: cfg.trust_mode.clone(),
         sessions: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
@@ -170,11 +175,14 @@ pub fn start_receiver_with(config_json: &str, notifier: Option<Notifier>) -> Res
     let worker = thread::spawn(move || {
         // 门禁在循环外建一次：信任表每次判定前自己 stat 重放，撤销后下一场会话立即生效，
         // 所以不需要每轮重建。identity_dir 与界面读的信任库是同一个目录。
+        // v0.20：挂上二维码令牌表。它与界面「配对二维码」共享同一个实例，
+        // 所以界面上点「立即作废」后，下一场会话立刻不再认这张码。
         let gate = TrustGate::new(
             Arc::new(TrustStore::new(&cfg2.identity_dir)),
             TrustMode::parse(&cfg2.trust_mode),
             cfg2.pair_code.clone(),
-        );
+        )
+        .with_pair_tokens(pair_tokens_for(&cfg2.identity_dir.to_string_lossy()));
         while !stop2.load(Ordering::Relaxed) {
             // v0.15：Android 接收端固定单流。多条 TLS 流在手机上会明显增加 CPU 与发热，
             // 而手机作为发送方时仍会按对端要求开多流；接收端并行留到有温升实测数据后再开。
@@ -257,6 +265,8 @@ pub fn stop_receiver(id: u64) -> bool {
         None => return false,
     };
     rt.stop.store(true, Ordering::Relaxed);
+    // v0.20：接收端都停了就不该再接受配对，令牌一并作废，不留一张还能用的码在内存里
+    pair_tokens_for(&rt.identity_dir).revoke();
     // 广播线程自己分片轮询 stop，最多 200ms 就退出；这里 join 保证停止后不再发公告
     if let Some(h) = rt.announce.lock().expect("announce poisoned").take() {
         let _ = h.join();
@@ -278,6 +288,126 @@ pub fn status_json(id: u64) -> Option<String> {
         })
         .to_string(),
     )
+}
+
+// ---- v0.20 二维码配对：进程级令牌表 + 配对载荷 ----
+//
+// 为什么按 identity_dir 存一份而不是全局一份：Android 上身份目录唯一，
+// 但保持和信任库同样的「按目录认身份」口径，桌面测试与多身份场景也不会串。
+
+static PAIR_TOKENS: OnceLock<Mutex<HashMap<String, Arc<PairTokens>>>> = OnceLock::new();
+
+fn pair_tokens_for(dir: &str) -> Arc<PairTokens> {
+    let mut g = PAIR_TOKENS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("pair tokens poisoned");
+    g.entry(dir.to_string())
+        .or_insert_with(|| Arc::new(PairTokens::new()))
+        .clone()
+}
+
+/// 生成配对二维码的内容。`addr` 为空时自动探测本机局域网地址（端口沿用 53318）。
+/// 返回 {"ok":true,"active":true,"addr","payload","expires","ttl","remaining"}；
+/// 探测不到地址时 ok=false，界面提示手填而不是拿回环地址凑数。
+pub fn pair_issue_json(dir: &str, addr: &str, name: &str) -> String {
+    let identity = match Identity::load_or_create(std::path::Path::new(dir)) {
+        Ok(i) => i,
+        Err(e) => return err_json(format!("本机身份加载失败: {e}")),
+    };
+    let addr = resolve_pair_addr(addr);
+    if addr.is_empty() {
+        return err_json("无法自动判断本机局域网地址，请手动填写（例如 192.168.1.23:53318）");
+    }
+    let token = match pair_tokens_for(dir).issue() {
+        Ok(t) => t,
+        Err(e) => return err_json(e.to_string()),
+    };
+    let payload = PairPayload {
+        addr: addr.clone(),
+        fp: identity.fingerprint_hex(),
+        code: token.token,
+        exp: token.expires,
+        name: name.trim().to_string(),
+    };
+    json!({
+        "ok": true,
+        "active": true,
+        "addr": addr,
+        "payload": payload.encode(),
+        "expires": token.expires,
+        "ttl": token.ttl,
+        "remaining": (token.expires - tc_core::queue::now_secs()).max(0),
+    })
+    .to_string()
+}
+
+/// 查看当前有效码（不换码）。没有有效码时 active=false。
+pub fn pair_status_json(dir: &str, addr: &str, name: &str) -> String {
+    let Some(token) = pair_tokens_for(dir).active() else {
+        return json!({ "ok": true, "active": false }).to_string();
+    };
+    let addr = resolve_pair_addr(addr);
+    let fp = Identity::load_or_create(std::path::Path::new(dir))
+        .map(|i| i.fingerprint_hex())
+        .unwrap_or_default();
+    let payload = PairPayload {
+        addr: addr.clone(),
+        fp,
+        code: token.token,
+        exp: token.expires,
+        name: name.trim().to_string(),
+    };
+    json!({
+        "ok": true,
+        "active": true,
+        "addr": addr,
+        "payload": payload.encode(),
+        "expires": token.expires,
+        "ttl": token.ttl,
+        "remaining": (token.expires - tc_core::queue::now_secs()).max(0),
+    })
+    .to_string()
+}
+
+/// 立即作废。返回 {"ok":true,"revoked":bool}。
+pub fn pair_revoke_json(dir: &str) -> String {
+    json!({ "ok": true, "revoked": pair_tokens_for(dir).revoke() }).to_string()
+}
+
+/// 解析扫到的二维码。校验规则与桌面端同一份实现，避免两端判断不一致。
+/// 返回 {"ok":true,"addr","fp","code","exp","name","expired","hint"}。
+pub fn pair_parse_json(text: &str) -> String {
+    match PairPayload::parse(text) {
+        Ok(p) => {
+            let now = tc_core::queue::now_secs();
+            json!({
+                "ok": true,
+                "addr": p.addr,
+                "fp": p.fp,
+                "code": p.code,
+                "exp": p.exp,
+                "name": p.name,
+                "remaining": (p.exp - now).max(0),
+                "expired": p.locally_expired(now),
+                "hint": p.expiry_hint(now),
+            })
+            .to_string()
+        }
+        Err(e) => err_json(e),
+    }
+}
+
+/// 地址留空就探测；探测不到返回空串，由调用方提示手填。
+fn resolve_pair_addr(addr: &str) -> String {
+    let addr = addr.trim();
+    if !addr.is_empty() {
+        return addr.to_string();
+    }
+    match tc_core::pair::local_lan_addr() {
+        Some(ip) => format!("{ip}:53318"),
+        None => String::new(),
+    }
 }
 
 // ---- 发送（M1：路径模式）----
@@ -726,6 +856,79 @@ pub extern "system" fn Java_com_tongchuan_TcNative_trustRevoke<'local>(
     match store.revoke(fp.trim(), "android-ui", "") {
         Ok(true) => 1,
         _ => 0,
+    }
+}
+
+// ---- v0.20 配对二维码的 JNI 薄包装 ----
+// 四个函数都只做字符串转换，逻辑在 core，和桌面端共用同一份实现。
+
+#[no_mangle]
+pub extern "system" fn Java_com_tongchuan_TcNative_pairIssue<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    dir: JString<'local>,
+    addr: JString<'local>,
+    name: JString<'local>,
+) -> jstring {
+    let (dir, addr, name): (String, String, String) =
+        match (env.get_string(&dir), env.get_string(&addr), env.get_string(&name)) {
+            (Ok(d), Ok(a), Ok(n)) => (d.into(), a.into(), n.into()),
+            _ => return std::ptr::null_mut(),
+        };
+    match env.new_string(pair_issue_json(&dir, &addr, &name)) {
+        Ok(v) => v.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_tongchuan_TcNative_pairStatus<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    dir: JString<'local>,
+    addr: JString<'local>,
+    name: JString<'local>,
+) -> jstring {
+    let (dir, addr, name): (String, String, String) =
+        match (env.get_string(&dir), env.get_string(&addr), env.get_string(&name)) {
+            (Ok(d), Ok(a), Ok(n)) => (d.into(), a.into(), n.into()),
+            _ => return std::ptr::null_mut(),
+        };
+    match env.new_string(pair_status_json(&dir, &addr, &name)) {
+        Ok(v) => v.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_tongchuan_TcNative_pairRevoke<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    dir: JString<'local>,
+) -> jstring {
+    let dir: String = match env.get_string(&dir) {
+        Ok(d) => d.into(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+    match env.new_string(pair_revoke_json(&dir)) {
+        Ok(v) => v.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_tongchuan_TcNative_pairParse<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    text: JString<'local>,
+) -> jstring {
+    let text: String = match env.get_string(&text) {
+        Ok(s) => s.into(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+    match env.new_string(pair_parse_json(&text)) {
+        Ok(v) => v.into_raw(),
+        Err(_) => std::ptr::null_mut(),
     }
 }
 

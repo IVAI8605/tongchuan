@@ -215,6 +215,9 @@ pub struct TrustGate {
     pub store: Arc<TrustStore>,
     pub mode: TrustMode,
     pub pair_code: Option<String>,
+    /// v0.20：二维码一次性令牌。None = 未启用（旧调用方行为不变）。
+    /// 与生成二维码的界面共用同一个实例，界面撤销后这里立刻跟着失效。
+    pub tokens: Option<Arc<crate::pair::PairTokens>>,
 }
 
 impl TrustGate {
@@ -223,10 +226,17 @@ impl TrustGate {
             store,
             mode,
             pair_code,
+            tokens: None,
         }
     }
 
-    /// 顺序：已信任 → 配对码（仅配置非空时）→ open 放行 → closed 拒绝并记 denied。
+    /// 挂上一次性令牌表（v0.20 二维码配对）
+    pub fn with_pair_tokens(mut self, tokens: Arc<crate::pair::PairTokens>) -> Self {
+        self.tokens = Some(tokens);
+        self
+    }
+
+    /// 顺序：已信任 → 二维码令牌 → 静态配对码（仅配置非空时）→ open 放行 → closed 拒绝并记 denied。
     /// 撤销立刻生效，因为每次都先 stat 文件重放，不缓存「启动时的信任表」。
     pub fn evaluate(
         &self,
@@ -245,6 +255,29 @@ impl TrustGate {
         if let Some(fp) = &fp_hex {
             if self.store.is_trusted(fp)? {
                 return Ok(GateVerdict::Allow);
+            }
+        }
+
+        // v0.20：二维码令牌排在静态配对码之前——它是临时、一次性、10 分钟过期的，
+        // 比长期静态码更可信；命中即消费，所以同一张码只能配一台设备。
+        if let (Some(tokens), Some(got)) = (&self.tokens, pair_code) {
+            match tokens.consume(got) {
+                crate::pair::ConsumeResult::Ok => {
+                    if let Some(fp) = &fp_hex {
+                        // 配过一次即入信任表：后续再发不需要重新扫码
+                        self.store
+                            .approve(fp, "", &device.name, &device.platform, "pair-qr")?;
+                    }
+                    return Ok(GateVerdict::Allow);
+                }
+                // 近期失败过多：不再往下比静态码，避免同一入口被当成穷举通道
+                crate::pair::ConsumeResult::RateLimited => {
+                    return Ok(GateVerdict::Deny(
+                        "pair token rejected: 失败次数过多，请稍后再试或重新生成二维码".into(),
+                    ));
+                }
+                // 过期/不符/没生成：继续走原有判定，用户手输静态配对码仍可用
+                _ => {}
             }
         }
 

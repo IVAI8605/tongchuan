@@ -943,11 +943,15 @@ fn run(args: &[String]) -> io::Result<()> {
                     "信任模式 closed 且信任表为空：需先用 tc trust approve、管理页批准，或配置非空 pair_code",
                 );
             }
-            let gate = Arc::new(TrustGate::new(
-                Arc::clone(&state.trust),
-                trust_mode,
-                cfg.pair_code.clone(),
-            ));
+            let gate = Arc::new(
+                TrustGate::new(
+                    Arc::clone(&state.trust),
+                    trust_mode,
+                    cfg.pair_code.clone(),
+                )
+                // v0.20：管理页生成的二维码令牌与门禁共用同一份，作废后立刻失效
+                .with_pair_tokens(Arc::clone(&state.pair)),
+            );
             let listener = TcpListener::bind(&cfg.listen)?;
             let acc = TlsAccepter {
                 listener,
