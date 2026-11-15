@@ -206,6 +206,7 @@ fn record_history(req: &SendRequest, result: &io::Result<crate::SendReport>) {
             ok: r.verdict == "OK",
             reason: None,
             retry_of: None,
+            failed: r.failed.clone(),
         },
         Err(e) => history::SendRecord {
             id: history::new_id(),
@@ -220,6 +221,7 @@ fn record_history(req: &SendRequest, result: &io::Result<crate::SendReport>) {
             ok: false,
             reason: Some(e.to_string()),
             retry_of: None,
+            failed: Vec::new(),
         },
     };
     // 历史写失败不该影响已经结束的传输，只留一行提示

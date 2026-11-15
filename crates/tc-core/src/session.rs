@@ -2,6 +2,7 @@ use crate::frame::{
     read_frame, read_full_block, read_message, write_frame, write_message, FrameHeader, FrameType,
     BLOCK_SIZE,
 };
+use crate::history::FailedFile;
 use crate::manifest::{local_device, DeviceInfo, Manifest};
 use crate::pathsafe::{ensure_within, sanitize_relative};
 use crate::store::{PartFile, PathStore, Store};
@@ -404,6 +405,10 @@ pub enum Control {
     },
     VerifyFail {
         reason: String,
+        /// v0.17：判定失败的文件清单。旧接收端没有这个字段，serde 默认空表，
+        /// 发送端只记整场失败原因，`resend --failed` 会提示没有可重发的文件。
+        #[serde(default)]
+        failed: Vec<FailedFile>,
     },
 }
 
@@ -422,6 +427,8 @@ pub struct SendReport {
     pub files_skipped: u64,
     /// 接收端回报的落点根目录名（v0.11）。界面用它显示「传到了哪个文件夹」。
     pub dest_dirs: Vec<String>,
+    /// v0.17：接收端判定失败的文件，已映射回本机绝对路径（`path`），供历史与重发使用。
+    pub failed: Vec<FailedFile>,
     pub verdict: String,
 }
 
@@ -1006,11 +1013,17 @@ pub fn run_sender_with_device_control_opts(
             txn_id: manifest.txn_id.clone(),
         },
     )?;
-    let (verdict, dest_dirs) = match read_message::<_, Control>(&mut ctrl)? {
-        Control::VerifyOk { dest_dirs, .. } => ("OK".to_string(), dest_dirs),
-        Control::VerifyFail { reason } => (reason, Vec::new()),
+    let (verdict, dest_dirs, mut failed) = match read_message::<_, Control>(&mut ctrl)? {
+        Control::VerifyOk { dest_dirs, .. } => ("OK".to_string(), dest_dirs, Vec::new()),
+        Control::VerifyFail { reason, failed } => (reason, Vec::new(), failed),
         other => return Err(io_err(format!("unexpected verdict: {other:?}"))),
     };
+    // 接收端只知道相对路径；把它映射回本机绝对路径，历史与 `resend --failed` 才能直接用
+    for f in &mut failed {
+        if let Some(src) = source_map.get(&f.id) {
+            f.path = Some(src.to_string_lossy().to_string());
+        }
+    }
 
     Ok(SendReport {
         txn_id: manifest.txn_id,
@@ -1021,6 +1034,7 @@ pub fn run_sender_with_device_control_opts(
         streams,
         files_skipped,
         dest_dirs,
+        failed,
         verdict,
     })
 }
@@ -2098,12 +2112,14 @@ fn handle_session(
             ctrl,
             &Control::VerifyFail {
                 reason: "interrupted (resume pending)".into(),
+                failed: Vec::new(),
             },
         )?;
         return Ok(base);
     }
 
     let mut failure: Option<String> = None;
+    let mut failed_files: Vec<FailedFile> = Vec::new();
     let t_verify = std::time::Instant::now();
     // 增量校验已经把每个块的哈希和每个文件的根哈希都核对过了，这里只需要确认块确实收齐，
     // 再省掉一遍全量读盘；任何一项不满足（续传、块缺失、哈希不符）都退回原路径重算，绝不跳过校验。
@@ -2118,7 +2134,19 @@ fn handle_session(
         let mut part = lock_part(part);
         if !inc_ok {
             if let Err(e) = part.verify(f) {
-                failure = Some(format!("{}: {e}", f.rel_path));
+                let reason = e.to_string();
+                // v0.17：校验失败必须作废这个文件的半成品与位图，否则坏块会被
+                // 位图记为「已收」，下次重发继续跳过，永远卡在同一批坏块上。
+                if let Err(e2) = part.invalidate() {
+                    eprintln!("WARN: 校验失败后隔离半成品出错 {}: {e2}", f.rel_path);
+                }
+                failure = Some(format!("{}: {reason}", f.rel_path));
+                failed_files.push(FailedFile {
+                    id: f.id.clone(),
+                    rel_path: f.rel_path.clone(),
+                    reason,
+                    path: None,
+                });
                 break;
             }
         }
@@ -2130,7 +2158,14 @@ fn handle_session(
         } else {
             store.finalize(&mut part, &layout.final_paths[i])
         } {
-            failure = Some(format!("{}: {e}", f.rel_path));
+            let reason = e.to_string();
+            failure = Some(format!("{}: {reason}", f.rel_path));
+            failed_files.push(FailedFile {
+                id: f.id.clone(),
+                rel_path: f.rel_path.clone(),
+                reason,
+                path: None,
+            });
             break;
         }
     }
@@ -2138,7 +2173,13 @@ fn handle_session(
     let verify_us = t_verify.elapsed().as_micros() as u64;
     match failure {
         Some(reason) => {
-            write_message(ctrl, &Control::VerifyFail { reason })?;
+            write_message(
+                ctrl,
+                &Control::VerifyFail {
+                    reason,
+                    failed: failed_files,
+                },
+            )?;
             Ok(ReceiverReport { verify_us, ..base })
         }
         None => {

@@ -35,6 +35,24 @@ pub struct SendRecord {
     /// 由哪条记录重传而来，用于把重试链串起来
     #[serde(rename = "retryOf", default, skip_serializing_if = "Option::is_none")]
     pub retry_of: Option<String>,
+    /// v0.17：本场判定失败的文件。空表不写字段，旧记录读出来也是空表。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<FailedFile>,
+}
+
+/// v0.17：一个失败文件的记录。
+/// `id`/`rel_path` 来自接收端的校验结果；`path` 是发送端把它映射回本机的绝对路径，
+/// `tc resend --failed` 只靠这个字段重发。旧接收端不返回该列表时为空。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailedFile {
+    #[serde(default)]
+    pub id: String,
+    #[serde(rename = "relPath", default)]
+    pub rel_path: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// 历史默认落点。可用 `TC_HOME` 覆盖（验证脚本靠它把产物关进项目内 .tmp）。
@@ -142,6 +160,7 @@ mod tests {
             ok,
             reason: None,
             retry_of: None,
+            failed: Vec::new(),
         }
     }
 
@@ -191,6 +210,35 @@ mod tests {
             r#"{{"id":"b2","ts":101,"to":"127.0.0.1:1","paths":[],"files":0,"bytes":0,"verdict":"OK","ok":true}}"#
         )
         .unwrap();
+    }
+
+    /// v0.17：失败清单要能原样读回，旧记录没有该字段时按空表处理。
+    #[test]
+    fn failed_files_roundtrip_and_legacy_rows_have_empty_list() {
+        let dir = temp_dir("failed");
+        let mut rec = sample("f1", false);
+        rec.failed = vec![FailedFile {
+            id: "x".into(),
+            rel_path: "相册/a.jpg".into(),
+            reason: "root hash mismatch".into(),
+            path: Some("D:/源/相册/a.jpg".into()),
+        }];
+        record(&dir, &rec).unwrap();
+
+        let got = find(&dir, "f1").unwrap();
+        assert_eq!(got.failed.len(), 1);
+        assert_eq!(got.failed[0].rel_path, "相册/a.jpg");
+        assert_eq!(got.failed[0].path.as_deref(), Some("D:/源/相册/a.jpg"));
+
+        // 旧记录（完全没有 failed 字段）读取后应为空表，不报错
+        let path = dir.join("send-history.jsonl");
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"id":"old","ts":1,"to":"127.0.0.1:1","paths":[],"files":0,"bytes":0,"verdict":"ERROR","ok":false}}"#
+        )
+        .unwrap();
+        assert!(find(&dir, "old").unwrap().failed.is_empty());
     }
 
     #[test]

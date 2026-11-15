@@ -5,13 +5,65 @@ use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 位图头：`#tc-map v2 <块大小>`。块号只有配合块大小才有意义，
-/// 头部就是为了在块大小变化（4 MiB → 8 MiB）后能判定旧位图不可复用。
-const MAP_HEADER: &str = "#tc-map v2";
+/// 位图头：`#tc-map v3 <块大小> <文件大小> <源根哈希>`。
+/// v2 只有块大小，无法区分「同名同大小但内容不同」的文件；v3 补上文件大小与源根哈希，
+/// 四项全部匹配才允许续传，否则旧半成品按不可信处理。
+const MAP_HEADER: &str = "#tc-map v3";
 
-fn map_header() -> String {
-    format!("{MAP_HEADER} {BLOCK_SIZE}\n")
+fn map_header(entry: &FileEntry) -> String {
+    format!("{MAP_HEADER} {BLOCK_SIZE} {} {}\n", entry.size, entry.blake3)
+}
+
+/// 位图头是否与本文件身份一致。只有 v3 且块大小、文件大小、源根哈希全对才算可续传；
+/// v2、无头、DONE 标记以及任何一项不符都返回 false。
+fn bitmap_matches(text: &str, entry: &FileEntry) -> bool {
+    let Some(header) = text.lines().next() else {
+        return false;
+    };
+    let parts: Vec<&str> = header.split_whitespace().collect();
+    parts.len() == 5
+        && parts[0] == "#tc-map"
+        && parts[1] == "v3"
+        && parts[2].parse::<usize>().ok() == Some(BLOCK_SIZE)
+        && parts[3].parse::<u64>().ok() == Some(entry.size)
+        && parts[4].eq_ignore_ascii_case(&entry.blake3)
+}
+
+/// 给将被隔离的文件找一个不撞名的后缀。命名规则是 `原文件名.stale-<秒级时间戳>`，
+/// 同秒重复时追加 `-2`、`-3`，不覆盖任何已有文件。
+fn isolation_target(path: &Path) -> PathBuf {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let base = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "part".into());
+    for n in 0..1000u32 {
+        let name = if n == 0 {
+            format!("{base}.stale-{secs}")
+        } else {
+            format!("{base}.stale-{secs}-{n}")
+        };
+        let candidate = path.with_file_name(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path.with_file_name(format!("{base}.stale-{secs}-overflow"))
+}
+
+/// 把文件改名隔离到旁边。不存在时什么也不做；改名失败原样返回错误，由调用方决定是否继续。
+fn isolate(path: &Path) -> io::Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let target = isolation_target(path);
+    fs::rename(path, &target)?;
+    Ok(Some(target))
 }
 
 /// 半成品文件 + 已收块位图。两者分开存，进程重启后能从位图直接算出缺口，不用重传整文件。
@@ -40,6 +92,19 @@ impl PartFile {
             fs::create_dir_all(parent)?;
         }
         let map_path = PathBuf::from(format!("{}.map", dest.to_string_lossy()));
+        // v0.17：先看旧位图身份。身份不符时把半成品与位图一起改名隔离，再按全新传输重建；
+        // 必须在打开 dest 之前做——Windows 下文件仍被句柄占用时无法改名。
+        if let Ok(text) = fs::read_to_string(&map_path) {
+            if !text.trim().is_empty() && !bitmap_matches(&text, entry) {
+                // 隔离失败不阻断本次传输：最坏情况是覆盖旧半成品，但不会再信任旧位图
+                if let Err(e) = isolate(&map_path) {
+                    eprintln!("WARN: 旧位图隔离失败 {}: {e}", map_path.display());
+                }
+                if let Err(e) = isolate(dest) {
+                    eprintln!("WARN: 旧半成品隔离失败 {}: {e}", dest.display());
+                }
+            }
+        }
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -64,27 +129,17 @@ impl PartFile {
             fs::create_dir_all(parent)?;
         }
 
-        // 位图第一行是头，记录块大小。块号只有在块大小相同时才有意义：
-        // v0.5.3 把块从 4 MiB 改成 8 MiB，旧位图若被当成可续传，会按错误偏移写文件（数据损坏）。
-        // 没有头的位图一律视为不可用——宁可重传，也不能写坏用户文件。
+        // 位图第一行是头，记录块大小、文件大小与源根哈希。四项全对才允许续传：
+        // 块大小变了会按错误偏移写（v0.5.3 的 4→8 MiB）；同名同大小但内容不同的文件
+        // 没有根哈希就分不出来，会把旧块当成新文件的进度（v0.17 修的就是这条）。
+        // 没有 v3 头或任何一项不符，一律视为不可用——宁可重传，也不能写坏用户文件。
         let mut received = HashSet::new();
         let mut map_usable = false;
         let text = fs::read_to_string(&map_path).unwrap_or_default();
         if !text.trim().is_empty() {
-            let mut lines = text.lines();
-            let header_ok = lines
-                .next()
-                .map(|h| {
-                    h.starts_with(MAP_HEADER)
-                        && h.split_whitespace()
-                            .nth(2)
-                            .and_then(|s| s.parse::<usize>().ok())
-                            == Some(BLOCK_SIZE)
-                })
-                .unwrap_or(false);
-            if header_ok {
+            if bitmap_matches(&text, entry) {
                 let mut valid = true;
-                for line in lines {
+                for line in text.lines().skip(1) {
                     match line.trim().parse::<u32>() {
                         Ok(i) if i < total_blocks => {
                             received.insert(i);
@@ -100,12 +155,17 @@ impl PartFile {
                 } else {
                     map_usable = true;
                 }
+            } else {
+                // SAF 入口拿不到可改名的半成品路径，只能先把位图隔离；数据本身会按缺块全量覆盖
+                if let Err(e) = isolate(&map_path) {
+                    eprintln!("WARN: 旧位图隔离失败 {}: {e}", map_path.display());
+                }
             }
         }
         // 位图不可用时先重写头：否则新的追加行会接在 "DONE" 或旧块号后面，
         // 下次启动解析仍然失败，看起来像「每次都要重传」。
         if !map_usable {
-            fs::write(&map_path, map_header())?;
+            fs::write(&map_path, map_header(entry))?;
         }
         // 追加句柄常驻，避免每块重复 open/close；写入量从 O(块数) 降到每块一行
         let map_file = OpenOptions::new().append(true).create(true).open(&map_path)?;
@@ -157,6 +217,30 @@ impl PartFile {
         if self.reopen_safe {
             self.file = None;
             self.map_file = None;
+        }
+    }
+
+    /// v0.17：校验失败时作废这个文件的半成品与位图——两者都改名隔离，不删除。
+    /// 否则坏块会被位图记为「已收」，下次重发继续跳过，永远校验不过。
+    /// SAF 场景半成品只有 fd、无法按路径改名，这里只隔离可写的位图。
+    pub fn invalidate(&mut self) -> io::Result<()> {
+        self.map_file = None;
+        let mut first_err = None;
+        if let Err(e) = isolate(&self.map_path) {
+            first_err = Some(e);
+        }
+        if self.reopen_safe {
+            // 先释放句柄：Windows 下文件仍被打开时改名会失败
+            self.file = None;
+            if let Err(e) = isolate(&self.path) {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 
@@ -372,7 +456,11 @@ mod tests {
     use super::*;
 
     fn sample_entry(size: u64) -> FileEntry {
-        let data = vec![7u8; size as usize];
+        sample_entry_with(7u8, size)
+    }
+
+    fn sample_entry_with(byte: u8, size: u64) -> FileEntry {
+        let data = vec![byte; size as usize];
         let (blake3, block_hashes) = crate::hash::hash_reader(&data[..]).unwrap();
         FileEntry {
             id: "f0".into(),
@@ -467,6 +555,58 @@ mod tests {
 
         let p = PartFile::open(&dest, &entry).unwrap();
         assert_eq!(p.missing().len(), 3, "无头旧位图必须整份重传");
+    }
+
+    /// v0.17：同名同大小但源根哈希不同，必须拒绝续传，把旧半成品与位图改名隔离后整份重传。
+    #[test]
+    fn same_size_different_hash_isolates_old_part() {
+        let dir = std::env::temp_dir().join(format!("tc-store-ident-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("a.bin.tcpart");
+        let map = PathBuf::from(format!("{}.map", dest.to_string_lossy()));
+        let size = BLOCK_SIZE as u64 * 2 + 10;
+        let old = sample_entry_with(7, size);
+        let new = sample_entry_with(9, size);
+
+        // 先按旧身份写满一块，留下可被误信的位图与半成品
+        {
+            let mut p = PartFile::open(&dest, &old).unwrap();
+            p.write_block(0, &vec![7u8; BLOCK_SIZE]).unwrap();
+        }
+        assert!(map.exists() && dest.exists());
+
+        let p = PartFile::open(&dest, &new).unwrap();
+        assert_eq!(p.missing().len(), 3, "身份不符必须整份重传");
+        // 旧的同名文件已被改名，原名位置是这次新建的 v3 位图与空半成品
+        let text = fs::read_to_string(&map).unwrap();
+        assert!(text.contains(&new.blake3), "新位图必须带本次源根哈希");
+        assert!(!text.contains(&old.blake3), "旧身份不能留在当前位图里");
+        let stale: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".stale-"))
+            .collect();
+        assert_eq!(stale.len(), 2, "半成品与位图各留一份可找回的隔离副本");
+    }
+
+    /// 校验失败时作废：invalidate 后半成品与位图都被改名，下一次打开必须从零开始。
+    #[test]
+    fn invalidate_moves_part_and_bitmap_aside() {
+        let dir = std::env::temp_dir().join(format!("tc-store-inv-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("a.bin.tcpart");
+        let map = PathBuf::from(format!("{}.map", dest.to_string_lossy()));
+        let entry = sample_entry(16);
+
+        let mut p = PartFile::open(&dest, &entry).unwrap();
+        p.write_block(0, &[7u8; 16]).unwrap();
+        p.invalidate().unwrap();
+        assert!(!dest.exists());
+        assert!(!map.exists());
+
+        let p = PartFile::open(&dest, &entry).unwrap();
+        assert!(!p.complete(), "作废后不能继承旧进度");
     }
 
     /// DONE 之后再次收到同名文件，必须完全重传，不能误续到旧进度。

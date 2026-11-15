@@ -111,6 +111,69 @@ fn interrupted_transfer_resumes_from_bitmap() {
     );
 }
 
+/// v0.17：续传时发现半成品数据坏了，必须作废旧位图；下一次重发从零开始并成功。
+/// 这是「校验失败 → 位图仍被信任 → 永久失败」那条死循环的回归用例。
+#[test]
+fn corrupted_resume_invalidates_bitmap_and_next_retry_succeeds() {
+    let root = test_dir("corrupt-resume");
+    let src = root.join("src/大文件");
+    let data = vec![0x5au8; BLOCK_SIZE * 2 + 321];
+    write_file(&src.join("blob.bin"), &data);
+    let dest = root.join("recv");
+    fs::create_dir_all(&dest).unwrap();
+
+    // 第一次只收 1 块，留下位图与半成品
+    let (l1, a1) = listener_and_addr();
+    let d1 = dest.clone();
+    let h1 = thread::spawn(move || run_receiver_on(l1, &d1, Some(1)).unwrap());
+    let _ = run_sender(&a1, &[src.clone()]);
+    assert!(h1.join().unwrap().interrupted);
+
+    // 把已收块的半成品内容改坏：位图仍声称这一块已收，续传后会校验失败
+    let part = dest.join("大文件/blob.bin.tcpart");
+    let mut broken = fs::read(&part).unwrap();
+    broken[..16].fill(0xff);
+    fs::write(&part, &broken).unwrap();
+
+    // 第二次续传：只补缺块 → 校验失败 → 接收端应作废位图并把失败文件回报给发送端
+    let (l2, a2) = listener_and_addr();
+    let d2 = dest.clone();
+    let h2 = thread::spawn(move || run_receiver_on(l2, &d2, None).unwrap());
+    let s2 = run_sender(&a2, &[src.clone()]).unwrap();
+    let r2 = h2.join().unwrap();
+    assert!(!r2.verified, "坏块必须被校验拦下");
+    assert_ne!(s2.verdict, "OK");
+    assert_eq!(s2.failed.len(), 1, "失败清单应指出具体文件");
+    assert_eq!(
+        s2.failed[0].path.as_deref(),
+        Some(src.join("blob.bin").to_string_lossy().as_ref()),
+        "失败文件要映射回本机绝对路径，resend --failed 才有得发"
+    );
+
+    // 作废后不能留下仍被信任的活动位图；隔离副本允许保留
+    assert!(!part.exists(), "坏半成品应被改名隔离");
+    let stale_count = fs::read_dir(dest.join("大文件"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".stale-"))
+        .count();
+    assert!(stale_count >= 1, "至少保留一份可找回的隔离副本");
+
+    // 第三次重发：没有位图可续，整份重传并校验通过
+    let (l3, a3) = listener_and_addr();
+    let d3 = dest.clone();
+    let h3 = thread::spawn(move || run_receiver_on(l3, &d3, None).unwrap());
+    let s3 = run_sender(&a3, &[src]).unwrap();
+    let r3 = h3.join().unwrap();
+    assert_eq!(s3.verdict, "OK");
+    assert!(r3.verified);
+    assert_eq!(r3.resumed_blocks, 0, "作废后必须从零开始");
+    assert_eq!(
+        hash_bytes(&fs::read(dest.join("大文件/blob.bin")).unwrap()),
+        hash_bytes(&data)
+    );
+}
+
 #[test]
 fn receiver_rejects_traversal_in_manifest() {
     let m = Manifest {

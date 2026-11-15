@@ -235,6 +235,14 @@ fn print_send(r: &tc_core::SendReport) {
         },
         r.verdict
     );
+    // v0.17：失败清单单独一行，避免把 SEND 主行撑长；旧脚本匹配 verdict= 不受影响
+    for f in &r.failed {
+        println!(
+            "FAILED path={} reason={}",
+            f.path.as_deref().unwrap_or(&f.rel_path),
+            f.reason
+        );
+    }
 }
 
 fn print_recv(r: &tc_core::ReceiverReport) {
@@ -271,6 +279,7 @@ fn record_send(
     verdict: String,
     reason: Option<String>,
     retry_of: Option<&str>,
+    failed: Vec<history::FailedFile>,
 ) {
     let rec = history::SendRecord {
         id: id.into(),
@@ -285,6 +294,7 @@ fn record_send(
         verdict,
         reason,
         retry_of: retry_of.map(str::to_string),
+        failed,
     };
     if let Err(e) = history::record(dir, &rec) {
         // 历史写失败不该把已经完成的传输改判成失败，只提示一句
@@ -328,6 +338,7 @@ fn send_attempt(
             r.verdict.clone(),
             None,
             retry_of,
+            r.failed.clone(),
         ),
         Err(e) => record_send(
             history_dir,
@@ -341,6 +352,7 @@ fn send_attempt(
             "ERROR".into(),
             Some(e.to_string()),
             retry_of,
+            Vec::new(),
         ),
     }
     (result, id)
@@ -617,6 +629,24 @@ fn run(args: &[String]) -> io::Result<()> {
             let dir = history_dir_of(args);
             let key = opt(args, "--id").unwrap_or_else(|| "last".into());
             let rec = history::find(&dir, &key)?;
+            // v0.17：--failed 只重发这条记录里判定失败的文件，不重跑整批
+            let only_failed = args.iter().any(|a| a == "--failed");
+            let resend_paths: Vec<PathBuf> = if only_failed {
+                let paths: Vec<PathBuf> = rec
+                    .failed
+                    .iter()
+                    .filter_map(|f| f.path.as_ref().map(PathBuf::from))
+                    .collect();
+                if paths.is_empty() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "这条历史没有可重发的失败文件（旧接收端可能未返回清单）",
+                    ));
+                }
+                paths
+            } else {
+                rec.paths.clone()
+            };
             // 历史不存配对码，对端仍要求配对时必须在这里现场给
             let pair_code = opt(args, "--pair-code");
             // 老记录可能没存指纹（当时走的是明文），重发时同样先听一轮公告补上，
@@ -633,7 +663,7 @@ fn run(args: &[String]) -> io::Result<()> {
             };
             let r = send_with_retry(
                 &rec.to,
-                &rec.paths,
+                &resend_paths,
                 peer_fp.as_deref(),
                 pair_code.as_deref(),
                 ident.as_ref().map(|(_, id)| id),
@@ -1109,7 +1139,7 @@ fn run(args: &[String]) -> io::Result<()> {
             println!("  tc send --to IP:PORT --dir PATH [--dir PATH...] [--peer-fp HEX] [--pair-code CODE] [--identity DIR] [--queue-dir DIR] [--history-dir DIR] [--retry] [--force] [--dest-id ID]");
             println!("  tc dests --to IP:PORT [--peer-fp HEX] [--pair-code CODE] [--identity DIR]");
             println!("  tc history [--dir DIR] [--limit N]");
-            println!("  tc resend [--id ID|last] [--history-dir DIR] [--pair-code CODE] [--identity DIR] [--retry] [--force] [--dest-id ID]");
+            println!("  tc resend [--id ID|last] [--failed] [--history-dir DIR] [--pair-code CODE] [--identity DIR] [--retry] [--force] [--dest-id ID]");
             println!("  tc diag [--config FILE] [--identity DIR] [--out DIR] [--log FILE] [--history-dir DIR]");
             println!("  tc recv --listen IP:PORT --dest PATH [--identity DIR] [--pair-code CODE] [--trust-mode closed|open] [--root-map r0=NAME] [--streams N] [--announce]");
             println!("  tc daemon --config FILE");
