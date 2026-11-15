@@ -100,6 +100,8 @@ public class MainActivity extends Activity {
     private final List<String[]> destOptions = new ArrayList<>();
     private String destId = "";
     private TextView destText;
+    /** 界面当前显示的接收目录；从「所有文件访问」设置页回来时靠它判断落点是否已自动切换 */
+    private String shownDest;
     /** 最近一次发现结果：勾选/取消后据此重画列表，不必再发一轮广播 */
     private String lastPeersJson;
     /** v0.7：最近发送列表容器 */
@@ -212,6 +214,19 @@ public class MainActivity extends Activity {
         });
         addWeighted(recvRow2, grantBtn, false);
         devicePanel.addView(recvRow2);
+
+        // 选过自定义目录后再也回不到默认，是这次改默认落点后暴露出来的缺口：
+        // 老用户存着旧的自定义路径，新默认对他就等于没生效，所以给一条明确的回程。
+        devicePanel.addView(button("恢复默认接收目录（Download/" + Dest.DEFAULT_DIR_NAME + "）", v -> {
+            Dest.clear(this);
+            if (ReceiverService.isRunning()) {
+                ReceiverService.restart(this);
+            }
+            android.widget.Toast.makeText(this,
+                    "已恢复默认：" + Dest.displayPath(Dest.current(this)),
+                    android.widget.Toast.LENGTH_LONG).show();
+            recreate();
+        }));
 
         // v0.20：出码本身属于「接收端动作」，放在常驻开关这一组里最顺手
         devicePanel.addView(button("配对二维码（让对方扫）", v -> showPairDialog()));
@@ -402,9 +417,8 @@ public class MainActivity extends Activity {
         TextView path = new TextView(this);
         path.setTextSize(12);
         path.setPadding(0, dp(16), 0, 0);
-        path.setText("接收目录：\n" + Dest.current(this).getAbsolutePath()
-                + "\n\n同一个 Wi-Fi 下，电脑端即可向本机投递。"
-                + "\n\n增强存活只需在无障碍里勾选「通传」，它不读屏幕、不代替你操作，随时可关。");
+        path.setText(receiveDirText());
+        shownDest = Dest.current(this).getAbsolutePath();
         devicePanel.addView(path);
 
         // 「信任策略」从最上方状态区搬进面板：它属于配置，不该常驻首页
@@ -694,6 +708,17 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // 从「所有文件访问」设置页回来时，默认落点会自动从私有目录切到 Download/局域网通传。
+        // 不在这里比对的话，界面还显示旧路径、接收端还往旧目录写，用户看到的就是「授权没生效」。
+        String now = Dest.current(this).getAbsolutePath();
+        if (shownDest != null && !shownDest.equals(now)) {
+            shownDest = now;
+            if (ReceiverService.isRunning()) {
+                ReceiverService.restart(this);
+            }
+            recreate();
+            return;
+        }
         refresh();
         refreshTrust();
         refreshRecent();
@@ -701,6 +726,37 @@ public class MainActivity extends Activity {
         refreshClip();
         uiTick.removeCallbacks(clipTick);
         uiTick.post(clipTick);
+    }
+
+    /**
+     * 接收目录说明。
+     * 新默认是「内置存储 / Download / 局域网通传」；没给「所有文件访问」时会退回应用私有目录，
+     * 这里必须写清实际落点，否则用户会觉得显示的路径和预期对不上。
+     */
+    private String receiveDirText() {
+        File cur = Dest.current(this);
+        StringBuilder sb = new StringBuilder();
+        sb.append("接收目录：\n").append(Dest.displayPath(cur))
+                .append("\n（").append(cur.getAbsolutePath()).append("）");
+        if (!Dest.hasAllFilesAccess()) {
+            sb.append("\n未授予「所有文件访问」，暂存应用私有目录；")
+                    .append("点上方「授予所有文件权限」后会自动切到 Download/")
+                    .append(Dest.DEFAULT_DIR_NAME).append("。");
+        }
+        File old = Dest.legacyDir(this);
+        // 旧默认目录里的文件既不迁移也不删除，只提示位置，免得用户以为收过的文件丢了
+        if (!old.getAbsolutePath().equals(cur.getAbsolutePath()) && hasEntries(old)) {
+            sb.append("\n旧默认目录里已有文件（未迁移、未删除）：\n").append(old.getAbsolutePath());
+        }
+        sb.append("\n\n同一个 Wi-Fi 下，电脑端即可向本机投递。")
+                .append("\n\n增强存活只需在无障碍里勾选「通传」，它不读屏幕、不代替你操作，随时可关。");
+        return sb.toString();
+    }
+
+    /** 目录里有没有内容（旧默认目录由本应用直接写入，只看一层就够）。 */
+    private static boolean hasEntries(File dir) {
+        String[] names = dir.list();
+        return names != null && names.length > 0;
     }
 
     @Override

@@ -4,6 +4,8 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
@@ -14,6 +16,7 @@ import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -21,18 +24,24 @@ import android.util.Size;
 import android.view.Gravity;
 import android.view.Surface;
 import android.view.TextureView;
+import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import com.google.zxing.BarcodeFormat;
 import com.google.zxing.BinaryBitmap;
+import com.google.zxing.ChecksumException;
 import com.google.zxing.DecodeHintType;
+import com.google.zxing.FormatException;
 import com.google.zxing.MultiFormatReader;
 import com.google.zxing.NotFoundException;
 import com.google.zxing.PlanarYUVLuminanceSource;
+import com.google.zxing.RGBLuminanceSource;
 import com.google.zxing.Result;
 import com.google.zxing.common.HybridBinarizer;
 
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -50,6 +59,9 @@ public class ScanActivity extends Activity {
 
     public static final String EXTRA_RESULT = "payload";
     private static final int REQ_CAMERA = 200;
+    private static final int REQ_GALLERY = 201;
+    /** 相册图片解码前的长边上限：手机原图动辄 4000px，全尺寸解码既慢又容易 OOM */
+    private static final int IMAGE_MAX_EDGE = 1600;
     private static final int TARGET_W = 1280;
     private static final int TARGET_H = 720;
 
@@ -61,6 +73,14 @@ public class ScanActivity extends Activity {
     private CameraCaptureSession session;
     private ImageReader reader;
     private final MultiFormatReader qr = new MultiFormatReader();
+    /**
+     * 相册图片专用解码器。
+     * 为什么不用上面那个 MultiFormatReader：它会把校验失败一律包成 NotFoundException，
+     * 分不清「图里没有二维码」和「有码但糊了」；直接用 QRCodeReader 才能分别给出提示。
+     */
+    private final com.google.zxing.qrcode.QRCodeReader qrImageReader =
+            new com.google.zxing.qrcode.QRCodeReader();
+    private final Map<DecodeHintType, Object> imageHints = new EnumMap<>(DecodeHintType.class);
     /** 一帧还没解完就不再塞下一帧：解码是 CPU 活，堆积只会发热掉帧 */
     private final AtomicBoolean busy = new AtomicBoolean(false);
     /** 已经拿到结果就不再解码，避免同一张码触发多次回调 */
@@ -84,10 +104,23 @@ public class ScanActivity extends Activity {
         hint.setGravity(Gravity.CENTER);
         hint.setBackgroundColor(0x66000000);
         hint.setPadding(24, 32, 24, 32);
+
+        // 相册入口放在底部：相机被拒、或二维码在另一张截图里时，这是唯一的扫码通道，
+        // 走系统文件选择器，不需要任何存储/相机权限。
+        Button pick = new Button(this);
+        pick.setText("从相册选择二维码");
+        pick.setOnClickListener(v -> openGallery());
+
+        LinearLayout bottom = new LinearLayout(this);
+        bottom.setOrientation(LinearLayout.VERTICAL);
+        bottom.addView(hint, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        bottom.addView(pick, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         FrameLayout.LayoutParams hl = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT);
         hl.gravity = Gravity.BOTTOM;
-        root.addView(hint, hl);
+        root.addView(bottom, hl);
         setContentView(root);
 
         bgThread = new HandlerThread("tc-scan");
@@ -101,6 +134,8 @@ public class ScanActivity extends Activity {
         hints.put(DecodeHintType.POSSIBLE_FORMATS, formats);
         hints.put(DecodeHintType.TRY_HARDER, Boolean.TRUE);
         qr.setHints(hints);
+        // 相册图没有尺寸上限，必须 TRY_HARDER；格式已经固定是二维码
+        imageHints.put(DecodeHintType.TRY_HARDER, Boolean.TRUE);
 
         preview.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override
@@ -319,12 +354,17 @@ public class ScanActivity extends Activity {
             PlanarYUVLuminanceSource src =
                     new PlanarYUVLuminanceSource(data, w, h, 0, 0, w, h, false);
             BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(src));
-            Result result = qr.decodeWithState(bitmap);
-            return result == null ? null : result.getText();
+            // 相册解码在另一条线程上用同一个 reader，必须互斥，否则 hints/状态会串
+            synchronized (qr) {
+                try {
+                    Result result = qr.decodeWithState(bitmap);
+                    return result == null ? null : result.getText();
+                } finally {
+                    qr.reset();
+                }
+            }
         } catch (NotFoundException | ArrayIndexOutOfBoundsException e) {
             return null;
-        } finally {
-            qr.reset();
         }
     }
 
@@ -337,6 +377,89 @@ public class ScanActivity extends Activity {
             setResult(RESULT_OK, new Intent().putExtra(EXTRA_RESULT, text));
             finish();
         });
+    }
+
+    /** 从系统文件选择器选一张图；不需要相机或存储权限，相机被拒时也能用。 */
+    private void openGallery() {
+        Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+        i.setType("image/*");
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        try {
+            startActivityForResult(Intent.createChooser(i, "选择二维码图片"), REQ_GALLERY);
+        } catch (Exception e) {
+            hint.setText("打不开相册：" + e.getMessage());
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_GALLERY) {
+            return;
+        }
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            return;
+        }
+        final Uri uri = data.getData();
+        hint.setText("正在识别图片…");
+        // 解码是纯 CPU 活，放后台线程，避免大图把界面卡成假死
+        new Thread(() -> decodeImageFromUri(uri), "tc-scan-image").start();
+    }
+
+    /**
+     * 解码相册图片里的二维码，成功走与相机扫码完全相同的回填路径。
+     * 先按长边降采样：手机原图动辄 4000px，全尺寸解码既慢又容易 OOM。
+     */
+    private void decodeImageFromUri(Uri uri) {
+        Bitmap bmp = null;
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                BitmapFactory.decodeStream(in, null, bounds);
+            }
+            int sample = 1;
+            while (bounds.outWidth / sample > IMAGE_MAX_EDGE
+                    || bounds.outHeight / sample > IMAGE_MAX_EDGE) {
+                sample *= 2;
+            }
+            BitmapFactory.Options opt = new BitmapFactory.Options();
+            opt.inSampleSize = sample;
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                bmp = BitmapFactory.decodeStream(in, null, opt);
+            }
+            if (bmp == null) {
+                failImage("这张图片读不出来，换一张试试");
+                return;
+            }
+            int w = bmp.getWidth();
+            int h = bmp.getHeight();
+            int[] pixels = new int[w * h];
+            bmp.getPixels(pixels, 0, w, 0, 0, w, h);
+            BinaryBitmap bitmap = new BinaryBitmap(
+                    new HybridBinarizer(new RGBLuminanceSource(w, h, pixels)));
+            Result result;
+            synchronized (qrImageReader) {
+                result = qrImageReader.decode(bitmap, imageHints);
+            }
+            finishWith(result.getText());
+        } catch (NotFoundException e) {
+            // 连定位图案都没找到：多半不是二维码，也可能整张糊到没有边缘
+            failImage("图片里没找到二维码\n换一张更清晰的图，或直接用相机扫");
+        } catch (ChecksumException | FormatException e) {
+            // 定位到了但内容校验不过：典型是拍糊、过度缩放或被裁掉一角
+            failImage("二维码识别失败（图片模糊或被裁切）\n换一张清晰的图再试");
+        } catch (Exception e) {
+            failImage("识别失败：" + e.getMessage());
+        } finally {
+            if (bmp != null) {
+                bmp.recycle();
+            }
+        }
+    }
+
+    private void failImage(String msg) {
+        runOnUiThread(() -> hint.setText(msg));
     }
 
     @Override

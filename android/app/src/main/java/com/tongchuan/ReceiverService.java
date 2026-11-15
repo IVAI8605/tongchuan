@@ -54,16 +54,6 @@ public class ReceiverService extends Service {
         return lastError;
     }
 
-    /** 接收落点：应用外部私有目录，卸载应用时一并清掉，不会污染用户相册。 */
-    public static File receiveDir(Context ctx) {
-        File dir = new File(ctx.getExternalFilesDir(null), "接收");
-        if (!dir.exists()) {
-            //noinspection ResultOfMethodCallIgnored
-            dir.mkdirs();
-        }
-        return dir;
-    }
-
     /**
      * 身份与信任库共用一个目录（identity.cer/key + trust.jsonl）。
      * 接收线程里的门禁和界面的「待确认/已信任」必须读同一份，否则批了也放不进来。

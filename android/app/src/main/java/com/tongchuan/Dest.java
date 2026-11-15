@@ -20,11 +20,13 @@ public final class Dest {
 
     static final String PREFS = "tongchuan";
     static final String KEY_PATH = "dest_path";
+    /** 新默认落点目录名：放在公共 Download 下，用户用系统文件管理器就能直接找到收到的文件。 */
+    static final String DEFAULT_DIR_NAME = "局域网通传";
 
     private Dest() {
     }
 
-    /** 当前落点：用户选过就用选的，没选过就用应用外部私有目录（免授权、卸载即清）。 */
+    /** 当前落点：用户选过就用选的，没选过就用默认（内置存储 / Download / 局域网通传）。 */
     public static File current(Context ctx) {
         String p = prefs(ctx).getString(KEY_PATH, null);
         if (p != null) {
@@ -33,7 +35,57 @@ public final class Dest {
                 return f;
             }
         }
-        return ReceiverService.receiveDir(ctx);
+        return defaultDir(ctx);
+    }
+
+    /**
+     * 默认落点：内置存储 / Download / 局域网通传。
+     *
+     * 为什么不能直接 mkdirs 了事：targetSdk 35 起写公共 Download 必须持有「所有文件访问」
+     * （MANAGE_EXTERNAL_STORAGE），否则 File API 直接 EACCES。没授权时退回 v0.20 之前的
+     * 应用外部私有目录，保证「装完就能收」；用户授权后下一次刷新自动切到公共目录。
+     * 这里不用 SAF：Rust 侧全程按真实路径写，SAF 的树 URI 还得额外做一层 fd 适配。
+     */
+    public static File defaultDir(Context ctx) {
+        if (Environment.isExternalStorageManager()) {
+            File pub = new File(Environment.getExternalStoragePublicDirectory(
+                    Environment.DIRECTORY_DOWNLOADS), DEFAULT_DIR_NAME);
+            if (pub.isDirectory() || pub.mkdirs()) {
+                return pub;
+            }
+        }
+        return legacyDir(ctx);
+    }
+
+    /**
+     * v0.20 及之前的默认落点：应用外部私有目录。
+     * 只作为无授权时的兜底与历史文件位置；旧文件不迁移、不删除，用户手动处理。
+     */
+    public static File legacyDir(Context ctx) {
+        File dir = new File(ctx.getExternalFilesDir(null), "接收");
+        if (!dir.isDirectory()) {
+            //noinspection ResultOfMethodCallIgnored
+            dir.mkdirs();
+        }
+        return dir;
+    }
+
+    /** 给人看的位置名：内置存储 / Download / 局域网通传；私有目录等其它位置直接显示绝对路径。 */
+    public static String displayPath(File dir) {
+        String abs = dir.getAbsolutePath();
+        String base = Environment.getExternalStorageDirectory().getAbsolutePath();
+        if (abs.startsWith(base + "/")) {
+            // 逐段用 " / " 连接，读起来就是「内置存储 / Download / 局域网通传」，而不是一条斜杠串
+            String[] parts = abs.substring(base.length() + 1).split("/");
+            StringBuilder sb = new StringBuilder("内置存储");
+            for (String p : parts) {
+                if (!p.isEmpty()) {
+                    sb.append(" / ").append(p);
+                }
+            }
+            return sb.toString();
+        }
+        return abs;
     }
 
     public static boolean hasCustom(Context ctx) {
