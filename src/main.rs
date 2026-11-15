@@ -216,12 +216,14 @@ fn send_identity(args: &[String]) -> io::Result<(PathBuf, Identity)> {
 
 fn print_send(r: &tc_core::SendReport) {
     // dest=：接收端回报的落点根目录名（v0.11），命令行也能看出「传到哪个文件夹」
+    // packs=：v0.14 收到的批量请求数，0 表示走的是逐块兼容路径
     println!(
-        "SEND txn={} files={} bytes={} blocks={} skipped={} dest={} verdict={}",
+        "SEND txn={} files={} bytes={} blocks={} packs={} skipped={} dest={} verdict={}",
         r.txn_id,
         r.files,
         r.bytes,
         r.blocks_sent,
+        r.packs,
         r.files_skipped,
         if r.dest_dirs.is_empty() {
             "-".to_string()

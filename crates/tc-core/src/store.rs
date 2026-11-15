@@ -22,11 +22,16 @@ pub struct PartFile {
     total_blocks: u32,
     file_size: u64,
     received: HashSet<u32>,
-    file: File,
+    /// v0.14：句柄改为可释放。小文件成批到达时，同时打开几千个文件会把 fd 用尽
+    /// （实测 NAS 上 5000 个小文件触发 Too many open files）。
+    file: Option<File>,
     /// 位图追加写句柄：每收一块只 append 一行块号（O(1)），不再整份重写。
     /// 老写法在 250 GB 量级会累计多写约 12 GB（见传输提速-规划 §13.4）。
     /// 解析路径不变——旧格式（排序后的全量块号）与新格式（追加行）都是一行一个数字。
     map_file: Option<File>,
+    /// 句柄能否按路径重新打开：`open()` 可以；Android 的 `from_file` 只有 fd，关掉就没了，
+    /// 所以那条路径保持常驻（`close_handles` 对它是空操作）。
+    reopen_safe: bool,
 }
 
 impl PartFile {
@@ -40,7 +45,10 @@ impl PartFile {
             .write(true)
             .create(true)
             .open(dest)?;
-        Self::from_file(file, dest.to_path_buf(), map_path, entry)
+        let mut part = Self::from_file(file, dest.to_path_buf(), map_path, entry)?;
+        // 走真实路径创建的半成品文件，句柄可以随时关掉再按路径重开
+        part.reopen_safe = true;
+        Ok(part)
     }
 
     /// Android SAF 入口：文件句柄由宿主（Kotlin）用 openFileDescriptor 拿到后传进来，
@@ -122,8 +130,10 @@ impl PartFile {
             total_blocks,
             file_size: entry.size,
             received,
-            file,
+            file: Some(file),
             map_file: Some(map_file),
+            // 默认按「句柄不可重开」处理，由 open() 显式打开这个能力
+            reopen_safe: false,
         })
     }
 
@@ -139,6 +149,22 @@ impl PartFile {
 
     pub fn complete(&self) -> bool {
         self.received.len() as u32 == self.total_blocks
+    }
+
+    /// v0.14：释放这个半成品文件占用的句柄，位图与已收块状态都保留。
+    /// 只有能按路径重开的场合才真正关闭；Android 的 fd 一关就回不来了，那里保持常驻。
+    pub fn close_handles(&mut self) {
+        if self.reopen_safe {
+            self.file = None;
+            self.map_file = None;
+        }
+    }
+
+    fn ensure_file(&mut self) -> io::Result<&mut File> {
+        if self.file.is_none() {
+            self.file = Some(OpenOptions::new().read(true).write(true).open(&self.path)?);
+        }
+        Ok(self.file.as_mut().expect("just opened"))
     }
 
     pub fn write_block(&mut self, idx: u32, data: &[u8]) -> io::Result<()> {
@@ -158,9 +184,12 @@ impl PartFile {
                 ),
             ));
         }
-        self.file.seek(SeekFrom::Start(idx as u64 * BLOCK_SIZE as u64))?;
-        self.file.write_all(data)?;
-        self.file.flush()?;
+        {
+            let file = self.ensure_file()?;
+            file.seek(SeekFrom::Start(idx as u64 * BLOCK_SIZE as u64))?;
+            file.write_all(data)?;
+            file.flush()?;
+        }
         self.received.insert(idx);
         self.append_map(idx)
     }
@@ -168,6 +197,10 @@ impl PartFile {
     /// 每收一块只追加一行块号。断电/被杀后仍能从缺口续传；
     /// 最坏情况是丢掉最后一行，代价只是重传那一个 4 MiB 块，不影响正确性。
     fn append_map(&mut self, idx: u32) -> io::Result<()> {
+        // 句柄被释放过就按位图路径重新追加打开；SAF 场景不释放，这里不会触发
+        if self.map_file.is_none() && self.reopen_safe {
+            self.map_file = Some(OpenOptions::new().append(true).create(true).open(&self.map_path)?);
+        }
         if let Some(f) = self.map_file.as_mut() {
             f.write_all(format!("{idx}\n").as_bytes())?;
             f.flush()?;
@@ -184,8 +217,9 @@ impl PartFile {
                 "not all blocks received",
             ));
         }
-        self.file.seek(SeekFrom::Start(0))?;
-        let (root, blocks) = hash_reader(&self.file)?;
+        let file = self.ensure_file()?;
+        file.seek(SeekFrom::Start(0))?;
+        let (root, blocks) = hash_reader(file)?;
         if root != entry.blake3 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -240,7 +274,10 @@ impl PartFile {
 
     /// SAF 下宿主已经把数据直接写进了正式文档，Rust 侧无法 rename，只能刷新并标记完成。
     pub fn finish_in_place(&mut self) -> io::Result<()> {
-        self.file.sync_all()?;
+        // SAF 场景句柄常驻；桌面路径若已释放句柄，数据在 flush 时已交给系统，这里跳过即可
+        if let Some(f) = self.file.as_mut() {
+            f.sync_all()?;
+        }
         self.mark_done()
     }
 

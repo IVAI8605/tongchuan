@@ -302,6 +302,9 @@ pub struct SendReport {
     pub files: u64,
     pub bytes: u64,
     pub blocks_sent: u64,
+    /// v0.14：本次收到的 PACK_REQ 包数。为 0 说明走的是逐块兼容路径，
+    /// 用来在测试与排障时确认「pack 到底有没有生效」。
+    pub packs: u64,
     /// 接收端按「同路径同内容」跳过的文件数（增量同步）。日志里要能看出省了多少。
     pub files_skipped: u64,
     /// 接收端回报的落点根目录名（v0.11）。界面用它显示「传到了哪个文件夹」。
@@ -803,6 +806,8 @@ pub fn run_sender_with_device_control_opts(
     // 一块 8 MiB，缓冲复用避免每块一次大分配
     let mut block_buf = vec![0u8; BLOCK_SIZE];
     let mut blocks_sent = 0u64;
+    // v0.14：收到的 PACK_REQ 数，进 SendReport 供测试与排障判断 pack 是否生效
+    let mut packs_received = 0u64;
     // 总块数按清单累加：接收端只会请求已接受的块，用总数做分母足够稳定
     let total_blocks: u64 = manifest.files.iter().map(|f| f.block_count() as u64).sum();
     let mut bytes_sent = 0u64;
@@ -881,6 +886,7 @@ pub fn run_sender_with_device_control_opts(
             FrameType::PackReq => {
                 // v0.14：一个请求带多块，按列表顺序连续回 BlockData；
                 // 帧格式与单块路径完全一致，接收端照旧逐块落盘与校验。
+                packs_received += 1;
                 let pr: PackRequest = serde_json::from_slice(&payload)
                     .map_err(|e| io_err(format!("PACK_REQ 解析失败: {e}")))?;
                 if pr.blocks.len() > PACK_MAX_BLOCKS {
@@ -958,6 +964,7 @@ pub fn run_sender_with_device_control_opts(
         files: manifest.total_files,
         bytes: manifest.total_bytes,
         blocks_sent,
+        packs: packs_received,
         files_skipped,
         dest_dirs,
         verdict,
@@ -1359,12 +1366,15 @@ fn handle_session(
         if skipped_set.contains(&i) {
             continue;
         }
-        let part = store.open_part(&layout.part_paths[i], f)?;
+        let mut part = store.open_part(&layout.part_paths[i], f)?;
         let missing = part.missing();
         resumed_blocks += f.block_count() as u64 - missing.len() as u64;
         for b in missing {
             requests.push((i as u64, b));
         }
+        // v0.14：位图读进内存后立刻释放文件与位图句柄。
+        // 否则几千个小文件会在传输开始前就各占两个 fd，NAS 上直接 Too many open files。
+        part.close_handles();
         parts.insert(i, part);
     }
 
@@ -1433,10 +1443,15 @@ fn handle_session(
                     return Err(io_err("BLOCK_DATA does not match the packed request"));
                 }
                 let t_write = std::time::Instant::now();
-                parts
-                    .get_mut(&(file_idx as usize))
-                    .expect("part opened above")
-                    .write_block(block_idx, &payload)?;
+                {
+                    let part = parts
+                        .get_mut(&(file_idx as usize))
+                        .expect("part opened above");
+                    part.write_block(block_idx, &payload)?;
+                    // v0.14：写完立刻释放句柄。小文件成批到达时，
+                    // 同时打开几千个文件会把 fd 用尽（NAS 实测）。
+                    part.close_handles();
+                }
                 write_us += t_write.elapsed().as_micros() as u64;
                 inc.feed(&manifest.files, file_idx as usize, block_idx, &payload);
                 blocks_written += 1;
@@ -1466,10 +1481,14 @@ fn handle_session(
             return Err(io_err("BLOCK_DATA does not match the request"));
         }
         let t_write = std::time::Instant::now();
-        parts
-            .get_mut(&(file_idx as usize))
-            .expect("part opened above")
-            .write_block(block_idx, &payload)?;
+        {
+            let part = parts
+                .get_mut(&(file_idx as usize))
+                .expect("part opened above");
+            part.write_block(block_idx, &payload)?;
+            // v0.14：逐块兼容路径同样写完即释放句柄
+            part.close_handles();
+        }
         write_us += t_write.elapsed().as_micros() as u64;
         // 顺路把块哈希和根哈希算掉：这段 CPU 本来就在等下一块的空档里，等于白捡
         inc.feed(&manifest.files, file_idx as usize, block_idx, &payload);
@@ -1549,6 +1568,8 @@ fn handle_session(
                 break;
             }
         }
+        // v0.14：校验后立即释放句柄，避免收尾阶段几千个文件再次占满 fd
+        part.close_handles();
         if let Err(e) = if force {
             // 强制重传：先让旧文件改名让位，本次文件保留源文件名
             store.finalize_aside(part, &layout.final_paths[i])

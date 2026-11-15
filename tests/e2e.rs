@@ -566,3 +566,38 @@ fn force_resend_retransmits_and_moves_old_file_aside() {
         "旧文件只改名，内容不受影响"
     );
 }
+
+/// v0.14：一批小文件必须走 pack 路径。`SendReport.packs` 为 0 说明降级成了逐块，
+/// 这个断言就是「pack 到底有没有生效」的守门。
+#[test]
+fn many_small_files_use_pack_path() {
+    let base = test_dir("pack-many-small");
+    let src = base.join("src");
+    fs::create_dir_all(&src).unwrap();
+    for i in 0..50 {
+        write_file(
+            &src.join(format!("f{i}.txt")),
+            format!("hello-{i}").as_bytes(),
+        );
+    }
+    let dest = base.join("dest");
+    fs::create_dir_all(&dest).unwrap();
+    let (listener, addr) = listener_and_addr();
+    let d = dest.clone();
+    let recv = thread::spawn(move || run_receiver_on(listener, &d, None).unwrap());
+    let sent = run_sender(&addr, &[src.clone()]).unwrap();
+    let r = recv.join().unwrap();
+
+    assert_eq!(sent.verdict, "OK");
+    assert!(
+        sent.packs > 0,
+        "50 个小文件应走 pack 路径，实际 packs={}",
+        sent.packs
+    );
+    assert_eq!(sent.blocks_sent, 50, "每个小文件一块");
+    assert!(r.verified, "接收端校验必须通过");
+    for i in 0..50 {
+        let p = dest.join("src").join(format!("f{i}.txt"));
+        assert_eq!(fs::read(&p).unwrap(), format!("hello-{i}").as_bytes());
+    }
+}
