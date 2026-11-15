@@ -21,6 +21,9 @@ pub enum FrameType {
     BlockData = 2,
     Done = 3,
     Ping = 4,
+    /// v0.14：一次请求多块（可跨文件），payload 是块列表 JSON。
+    /// 旧端不认识这个类型会直接报错，所以只有 HELLO 协商出 `pack` 能力后才会发。
+    PackReq = 5,
 }
 
 impl FrameType {
@@ -31,6 +34,7 @@ impl FrameType {
             2 => Ok(Self::BlockData),
             3 => Ok(Self::Done),
             4 => Ok(Self::Ping),
+            5 => Ok(Self::PackReq),
             other => Err(invalid(format!("unknown frame type: {other}"))),
         }
     }

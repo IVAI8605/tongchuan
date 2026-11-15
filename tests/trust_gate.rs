@@ -220,6 +220,7 @@ fn receiver_rejects_old_sender_with_readable_reason() {
             version: String::new(),
             // 冒充旧发送端：既没版本也没块大小，反序列化默认值就是 0
             block_size: 0,
+            caps: vec![],
         },
     )
     .unwrap();
@@ -250,6 +251,7 @@ fn sender_reports_old_receiver_with_readable_reason() {
             &Control::HelloAck {
                 version: "0.0.1".into(),
                 block_size: 0,
+                caps: vec![],
             },
         )
         .unwrap();

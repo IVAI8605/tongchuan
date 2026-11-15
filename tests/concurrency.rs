@@ -79,6 +79,7 @@ fn raw_session(addr: &str, txn_id: &str) -> TcpStream {
             pair_code: None,
             version: PROTOCOL_VERSION.into(),
             block_size: BLOCK_SIZE as u32,
+            caps: vec![],
         },
     )
     .unwrap();
@@ -106,6 +107,7 @@ fn mismatched_block_size_is_rejected_at_handshake() {
             version: PROTOCOL_VERSION.into(),
             // v0.5.2 及更早用的 4 MiB
             block_size: 4 * 1024 * 1024,
+            caps: vec![],
         },
     )
     .unwrap();
@@ -196,6 +198,7 @@ fn capacity_limit_replies_busy_instead_of_hanging() {
             pair_code: None,
             version: PROTOCOL_VERSION.into(),
             block_size: BLOCK_SIZE as u32,
+            caps: vec![],
         },
     )
     .unwrap();
@@ -378,6 +381,7 @@ fn single_session_rejects_second_device_explicitly() {
             pair_code: None,
             version: PROTOCOL_VERSION.into(),
             block_size: BLOCK_SIZE as u32,
+            caps: vec![],
         },
     )
     .unwrap();

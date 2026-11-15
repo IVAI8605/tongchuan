@@ -59,6 +59,21 @@ pub fn version_reject_from_receiver(receiver: &str) -> String {
     )
 }
 
+/// v0.14：一次请求多块的帧负载。用 (fileId, blockIndex) 列表表达，
+/// 顺序即发送顺序；接收端按同样顺序逐帧核对 BlockData。
+#[derive(Debug, Serialize, Deserialize)]
+struct PackRequest {
+    blocks: Vec<(u64, u32)>,
+}
+
+/// 单个 pack 的块数与字节上限：块数控制 JSON 大小与句柄切换次数，
+/// 字节数控制接收端在途内存（每块最多 8 MiB）。
+const PACK_MAX_BLOCKS: usize = 256;
+const PACK_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// v0.14：本次支持的能力。只有双方都声明才启用 pack（一次请求多块）。
+const CAP_PACK: &str = "pack";
+
 /// 块大小不一致的提示。只报「校验失败」用户查不出原因，必须点明两边数值与动作。
 pub fn block_size_reject_reason(peer: u32) -> String {
     let peer_text = if peer == 0 {
@@ -212,12 +227,19 @@ pub enum Control {
         /// 旧端没有这个键，serde 默认 0，接收端据此明确回「块大小不一致，请同版升级」。
         #[serde(rename = "blockSize", default)]
         block_size: u32,
+        /// v0.14：能力声明。旧端没有这个键，serde 默认空表，接收端据此走逐块兼容路径。
+        /// 目前只定义 `pack`：支持一次请求多块。
+        #[serde(default)]
+        caps: Vec<String>,
     },
     HelloAck {
         version: String,
         /// 与 HELLO 对称：新发送端据此拒绝旧接收端，避免传到一半才失败。
         #[serde(rename = "blockSize", default)]
         block_size: u32,
+        /// v0.14：服务端能力，与 HELLO 的 `caps` 取交集后才启用 pack。
+        #[serde(default)]
+        caps: Vec<String>,
     },
     /// 数据连接的身份声明。发送端开第二条连接后立刻发它，接收端才能按 txnId 把连接对回会话。
     /// 没有这条时接收端只能按 accept 顺序猜，第二台设备接入就会把控制连接当成数据连接。
@@ -725,6 +747,7 @@ pub fn run_sender_with_device_control_opts(
             pair_code: pair_code.map(|s| s.to_string()),
             version: PROTOCOL_VERSION.into(),
             block_size: BLOCK_SIZE as u32,
+            caps: vec![CAP_PACK.to_string()],
         },
     )?;
     match read_message::<_, Control>(&mut ctrl)? {
@@ -732,6 +755,7 @@ pub fn run_sender_with_device_control_opts(
         Control::HelloAck {
             version,
             block_size,
+            ..
         } => {
             if !protocol_compatible(&version) {
                 return Err(io_err(version_reject_from_receiver(&version)));
@@ -801,7 +825,7 @@ pub fn run_sender_with_device_control_opts(
                 thread::sleep(Duration::from_millis(120));
             }
         }
-        let (req, _) = read_frame(&mut data)?;
+        let (req, payload) = read_frame(&mut data)?;
         match req.kind {
             FrameType::BlockReq => {
                 let entry = manifest
@@ -852,6 +876,64 @@ pub fn run_sender_with_device_control_opts(
                         speed_bps,
                         ..Default::default()
                     });
+                }
+            }
+            FrameType::PackReq => {
+                // v0.14：一个请求带多块，按列表顺序连续回 BlockData；
+                // 帧格式与单块路径完全一致，接收端照旧逐块落盘与校验。
+                let pr: PackRequest = serde_json::from_slice(&payload)
+                    .map_err(|e| io_err(format!("PACK_REQ 解析失败: {e}")))?;
+                if pr.blocks.len() > PACK_MAX_BLOCKS {
+                    return Err(io_err("PACK_REQ 块数超过上限"));
+                }
+                for (file_id, block_index) in pr.blocks {
+                    let entry = manifest
+                        .files
+                        .get(file_id as usize)
+                        .ok_or_else(|| io_err("PACK_REQ references unknown fileId"))?;
+                    if !accepted_ids.contains(&entry.id) {
+                        return Err(io_err("receiver requested a file it did not accept"));
+                    }
+                    let abs = source_map
+                        .get(&entry.id)
+                        .ok_or_else(|| io_err("missing source path"))?;
+                    let f = handles.get_mut(file_id, abs)?;
+                    f.seek(SeekFrom::Start(block_index as u64 * BLOCK_SIZE as u64))?;
+                    let n = read_full_block(f, &mut block_buf)?;
+                    let out = FrameHeader::new(FrameType::BlockData, file_id, block_index);
+                    write_frame(&mut data, &out, &block_buf[..n])?;
+                    blocks_sent += 1;
+                    bytes_sent += n as u64;
+                    let now = Instant::now();
+                    speed_samples.push_back((now, bytes_sent));
+                    while speed_samples.len() > 2
+                        && now.duration_since(speed_samples[0].0) > SPEED_WINDOW
+                    {
+                        speed_samples.pop_front();
+                    }
+                    let speed_bps = if speed_samples.len() >= 2 {
+                        let (t0, b0) = speed_samples[0];
+                        let dt = now.duration_since(t0).as_secs_f64();
+                        if dt > 0.0 {
+                            ((bytes_sent - b0) as f64 / dt) as u64
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    if let Some(cb) = progress.as_mut() {
+                        cb(SendProgress {
+                            files: manifest.total_files,
+                            bytes_sent,
+                            total_bytes: manifest.total_bytes,
+                            blocks_sent,
+                            total_blocks,
+                            current: entry.rel_path.clone(),
+                            speed_bps,
+                            ..Default::default()
+                        });
+                    }
                 }
             }
             FrameType::Done => break,
@@ -1133,14 +1215,15 @@ fn handle_session(
 ) -> io::Result<ReceiverReport> {
     // 设备信息随 HELLO 一起到，这里先留下：历史记录要写清来源，
     // 不能等到协议跑完再回头找（那时控制连接可能已经断开）
-    let (txn_id, device, version, pair_code, peer_block_size) = match first {
+    let (txn_id, device, version, pair_code, peer_block_size, peer_caps) = match first {
         Control::Hello {
             txn_id,
             pair_code,
             device,
             version,
             block_size,
-        } => (txn_id, device, version, pair_code, block_size),
+            caps,
+        } => (txn_id, device, version, pair_code, block_size, caps),
         other => {
             // 不是 HELLO 的连接要明确回绝，否则对端只能干等到超时
             let _ = write_message(
@@ -1206,6 +1289,7 @@ fn handle_session(
         &Control::HelloAck {
             version: PROTOCOL_VERSION.into(),
             block_size: BLOCK_SIZE as u32,
+            caps: vec![CAP_PACK.to_string()],
         },
     )?;
 
@@ -1299,11 +1383,69 @@ fn handle_session(
     // 只有模拟中断（max_blocks）时退回窗口 1，否则会多发出请求，位图与中断语义都会对不上。
     // 窗口 2 实测把网络段从 98 MB/s 拉到 124 MB/s；加到 4 是为吸收抖动块（实测最大 RTT 16.8 ms），
     // 内存代价是 16 MiB 在途数据，接收端完全承受得起。
+    // v0.14：双方都声明 pack 才启用；模拟中断（max_blocks）仍走逐块，保证续传测试语义不变
+    let pack_enabled = max_blocks.is_none() && peer_caps.iter().any(|c| c == CAP_PACK);
     let window = if max_blocks.is_some() { 1 } else { 4 };
     // 全新传输才开增量校验：续传的块集合不连续，累积不出正确根哈希
     let mut inc = IncVerify::new(resumed_blocks == 0);
     let mut next_req = 0usize;
     let mut inflight: VecDeque<(u64, u32)> = VecDeque::new();
+
+    // v0.14：pack 路径。把待传块按「块数 ≤256、字节 ≤64 MiB」切包，
+    // 一包只发一个 PackReq，然后连续收它的 N 个 BlockData。
+    // 小文件时这是把「每文件一次往返」压成「每包一次」的关键。
+    if pack_enabled {
+        let mut idx = 0usize;
+        while idx < requests.len() {
+            let mut chunk: Vec<(u64, u32)> = Vec::new();
+            let mut chunk_bytes = 0usize;
+            while idx < requests.len() && chunk.len() < PACK_MAX_BLOCKS {
+                let (f, b) = requests[idx];
+                let fsize = manifest.files[f as usize].size;
+                let start = b as u64 * BLOCK_SIZE as u64;
+                let size = if fsize > start {
+                    (fsize - start).min(BLOCK_SIZE as u64) as usize
+                } else {
+                    0
+                };
+                if !chunk.is_empty() && chunk_bytes + size > PACK_MAX_BYTES {
+                    break;
+                }
+                chunk.push((f, b));
+                chunk_bytes += size;
+                idx += 1;
+            }
+            let payload = serde_json::to_vec(&PackRequest {
+                blocks: chunk.clone(),
+            })
+            .map_err(|e| io_err(format!("PACK_REQ 编码失败: {e}")))?;
+            let t_req = std::time::Instant::now();
+            write_frame(&mut data, &FrameHeader::new(FrameType::PackReq, 0, 0), &payload)?;
+            req_us += t_req.elapsed().as_micros() as u64;
+            for (file_idx, block_idx) in chunk {
+                let t_wait = std::time::Instant::now();
+                let (resp, payload) = read_frame(&mut data)?;
+                wait_us += t_wait.elapsed().as_micros() as u64;
+                if resp.kind != FrameType::BlockData
+                    || resp.file_id != file_idx
+                    || resp.block_index != block_idx
+                {
+                    return Err(io_err("BLOCK_DATA does not match the packed request"));
+                }
+                let t_write = std::time::Instant::now();
+                parts
+                    .get_mut(&(file_idx as usize))
+                    .expect("part opened above")
+                    .write_block(block_idx, &payload)?;
+                write_us += t_write.elapsed().as_micros() as u64;
+                inc.feed(&manifest.files, file_idx as usize, block_idx, &payload);
+                blocks_written += 1;
+            }
+        }
+        // 块已全部走 pack 路径，让下面的逐块循环自然跳过
+        next_req = requests.len();
+    }
+
     while inflight.len() < window && next_req < requests.len() {
         let (f, b) = requests[next_req];
         let t_req = std::time::Instant::now();
