@@ -433,11 +433,28 @@ impl DaemonState {
 
     pub fn upsert_peer(&self, peer: PeerInfo) {
         let mut peers = self.peers.lock().expect("peers poisoned");
-        if let Some(p) = peers.iter_mut().find(|p| p.addr == peer.addr) {
-            *p = peer;
-        } else {
-            peers.push(peer);
-        }
+        // v0.13.5：同一指纹视为同一台设备。多网卡或开 VPN 时同一设备会从不同地址出现，
+        // 只按地址去重会在列表里堆出好几条同名设备；这里连它的旧地址一起替换。
+        peers.retain(|p| p.fingerprint != peer.fingerprint && p.addr != peer.addr);
+        peers.push(peer);
+    }
+
+    /// 管理页要显示的设备列表（v0.13.5）：
+    /// - 过滤回环地址：那是同机自动化验证发的公告，不是用户设备；
+    /// - 过滤 2 分钟没再出现的条目：设备关机或换网段后不该一直挂在列表里。
+    pub fn visible_peers(&self) -> Vec<PeerInfo> {
+        let cutoff = crate::queue::now_secs() - 120;
+        self.peers
+            .lock()
+            .expect("peers poisoned")
+            .iter()
+            .filter(|p| {
+                p.last_seen >= cutoff
+                    && !p.addr.starts_with("127.0.0.1:")
+                    && !p.addr.starts_with("localhost:")
+            })
+            .cloned()
+            .collect()
     }
 }
 

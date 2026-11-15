@@ -768,7 +768,7 @@ fn route(
                     .expect("current poisoned")
                     .as_ref()
                     .and_then(|c| serde_json::to_value(c).ok()),
-                peers: state.peers.lock().expect("peers poisoned").clone(),
+                peers: state.visible_peers(),
             };
             json(&s)
         }
@@ -779,7 +779,7 @@ fn route(
         ("GET", "/api/discover") => {
             // 对端广播间隔是 5 秒，等 5.5 秒保证覆盖一整轮
             thread::sleep(std::time::Duration::from_millis(5500));
-            json(&*state.peers.lock().expect("peers poisoned"))
+            json(&state.visible_peers())
         }
         // 目录浏览：管理页「浏览…」用，只列目录
         ("GET", "/api/fs") => {
