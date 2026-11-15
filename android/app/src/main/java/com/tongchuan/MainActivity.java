@@ -37,6 +37,8 @@ public class MainActivity extends Activity {
     private static final int REQ_TREE = 100;
     private static final int REQ_SEND_FILES = 101;
     private static final int REQ_SEND_TREE = 102;
+    /** v0.13.4：配对码并入后统一的面板标题，展开/收起文案都从这里取 */
+    private static final String DEVICE_TITLE = "设备与保活（发现、授权、信任、配对码）";
 
     // v0.13 视觉基调：浅灰底 + 白卡片 + 一个深绿色主色。
     // 全部代码构建界面，颜色集中在这里，改主题不用满文件找字面量。
@@ -57,9 +59,6 @@ public class MainActivity extends Activity {
     /** v0.12：设备与保活面板（发现、授权、信任、常驻、保活增强都收在这里） */
     private LinearLayout devicePanel;
     private TextView deviceToggle;
-    /** v0.13：配对码与本机指纹收进下拉，首页不再常驻一个输入框 */
-    private LinearLayout advancedPanel;
-    private TextView advancedToggle;
     /** v0.12：剪贴板面板 */
     private LinearLayout clipPanel;
     private TextView clipToggle;
@@ -125,8 +124,8 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(COLOR_BG);
 
         TextView title = new TextView(this);
-        // 版本号读安装包信息：以前写死「通传 0.4.0」，升版后界面会一直显示过期版本
-        title.setText("通传 " + versionName());
+        // v0.13.4：标题只留应用名，版本号挪到页面最后一行
+        title.setText("局域网通传");
         title.setTextSize(24);
         title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         title.setTextColor(COLOR_INK);
@@ -137,7 +136,7 @@ public class MainActivity extends Activity {
         // v0.12：发现、授权、信任、常驻、保活增强全部收进一个展开面板。
         // v0.13：面板创建在这里、但等发送区之后再挂到 root，顺序按页面主次排。
         devicePanel = panel();
-        deviceToggle = sectionToggle("设备与保活（发现、授权、信任）", devicePanel, () -> {
+        deviceToggle = sectionToggle(DEVICE_TITLE, devicePanel, () -> {
             // 展开就拉一次真实状态：常驻/权限/信任都可能在面板收起期间变过
             refresh();
             refreshTrust();
@@ -245,7 +244,7 @@ public class MainActivity extends Activity {
         LinearLayout targetRow = new LinearLayout(this);
         targetRow.setOrientation(LinearLayout.HORIZONTAL);
         targetRow.setGravity(Gravity.CENTER_VERTICAL);
-        targetRow.setPadding(0, 0, 0, dp(10));
+        targetRow.setPadding(dp(14), 0, dp(14), dp(10));
         TextView sendLabel = new TextView(this);
         sendLabel.setText("发送到");
         sendLabel.setTextSize(17);
@@ -262,6 +261,8 @@ public class MainActivity extends Activity {
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.66f);
         targetLp.setMargins(dp(10), 0, 0, 0);
         sendTarget.setLayoutParams(targetLp);
+        // v0.13.4：点目标摘要直接进选设备——展开「设备与保活」并立刻发现一次
+        sendTarget.setOnClickListener(v -> openDevicePanelAndDiscover());
         targetRow.addView(sendTarget);
         root.addView(targetRow);
 
@@ -319,26 +320,7 @@ public class MainActivity extends Activity {
         sendCard.addView(sendBtnRow);
         root.addView(sendCard);
 
-        // v0.13：配对码与本机指纹不常驻首页，收进下拉；只有对方要求配对或要核对指纹时才展开
-        advancedPanel = panel();
-        advancedToggle = sectionToggle("配对码与本机指纹", advancedPanel);
-        root.addView(advancedToggle);
-        root.addView(advancedPanel);
-
-        // M4：配对码入口。对方开了「配对码」时，填对就不必再去管理页批准
-        pairInput = new android.widget.EditText(this);
-        pairInput.setHint("配对码（可选，6 位数字）");
-        pairInput.setInputType(InputType.TYPE_CLASS_NUMBER);
-        pairInput.setTextSize(14);
-        advancedPanel.addView(pairInput);
-
-        selfFpText = new TextView(this);
-        selfFpText.setTextSize(12);
-        selfFpText.setTextColor(COLOR_MUTED);
-        selfFpText.setText("本机指纹：读取中…");
-        advancedPanel.addView(selfFpText);
-
-        // 面板到这里才挂到页面上：顺序是「发送 → 配对码 → 设备与保活」
+        // v0.13.4：面板到这里才挂到页面上：顺序是「发送 → 设备与保活」
         root.addView(deviceToggle);
         root.addView(devicePanel);
 
@@ -406,6 +388,20 @@ public class MainActivity extends Activity {
         trustList.setOrientation(LinearLayout.VERTICAL);
         devicePanel.addView(trustList);
 
+        // v0.13.4：配对码与本机指纹并入「设备与保活」，放在面板末尾
+        pairInput = new android.widget.EditText(this);
+        pairInput.setHint("配对码（可选，6 位数字）");
+        pairInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        pairInput.setTextSize(14);
+        pairInput.setPadding(0, dp(12), 0, dp(2));
+        devicePanel.addView(pairInput);
+
+        selfFpText = new TextView(this);
+        selfFpText.setTextSize(12);
+        selfFpText.setTextColor(COLOR_MUTED);
+        selfFpText.setText("本机指纹：读取中…");
+        devicePanel.addView(selfFpText);
+
         // v0.7：最近发送。以前一批发完只剩界面上那行摘要，关掉应用就查不到了
         // v0.12：和「最近接收」一起放到最下方，各是一个展开页
         sendHistory = panel();
@@ -430,6 +426,15 @@ public class MainActivity extends Activity {
         status.setLineSpacing(dp(3), 1f);
         status.setPadding(dp(4), dp(20), dp(4), dp(12));
         root.addView(status);
+
+        // v0.13.4：版本号从标题挪到页面最后一行
+        TextView verText = new TextView(this);
+        verText.setText("版本 " + versionName());
+        verText.setTextSize(11);
+        verText.setTextColor(COLOR_MUTED);
+        verText.setGravity(Gravity.CENTER);
+        verText.setPadding(0, dp(2), 0, dp(10));
+        root.addView(verText);
 
         // 内容会随接收记录变长，套一层滚动容器，避免小屏上按钮被挤出屏幕
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
@@ -1665,6 +1670,20 @@ public class MainActivity extends Activity {
         if (recvToggleBtn != null && !recvPending) {
             recvToggleBtn.setText(ReceiverService.isRunning() ? "停止常驻接收" : "启动常驻接收");
         }
+    }
+
+    /**
+     * v0.13.4：点「发送到」后面的目标摘要时，展开设备面板并立刻发现一次。
+     * 点摘要的意图就是「换一台设备」，不该还要用户自己找展开入口、再点一次发现。
+     */
+    private void openDevicePanelAndDiscover() {
+        if (devicePanel.getVisibility() != ViewGroup.VISIBLE) {
+            devicePanel.setVisibility(ViewGroup.VISIBLE);
+            updateToggleText(deviceToggle, DEVICE_TITLE, true);
+        }
+        refresh();
+        refreshTrust();
+        discoverPeersAsync();
     }
 
     /**
