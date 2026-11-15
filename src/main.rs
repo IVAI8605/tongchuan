@@ -61,6 +61,14 @@ fn values(args: &[String], key: &str) -> Vec<String> {
         .collect()
 }
 
+/// v0.19：哈希缓存固定放在配置文件同目录，避免受启动时工作目录影响。
+fn cache_file_path(cfg_path: &Path) -> PathBuf {
+    cfg_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("hash-cache.jsonl")
+}
+
 fn parse_root_map(args: &[String]) -> HashMap<String, String> {
     // 形如 --root-map r0=自定义名字；值仍然要走逐段清洗，避免接收端自己写出越界路径
     values(args, "--root-map")
@@ -764,6 +772,8 @@ fn run(args: &[String]) -> io::Result<()> {
         "daemon" => {
             let cfg_path = PathBuf::from(value(args, "--config")?);
             let cfg = Config::load_or_create(&cfg_path)?;
+            // v0.19：缓存文件位置要跟着配置文件走，先算好，后面 cfg_path 会交给 DaemonState
+            let cache_path = cache_file_path(&cfg_path);
             // DaemonState::new 内部会校验白名单，这里不重复校验
             let state = Arc::new(DaemonState::new(cfg.clone(), cfg_path)?);
             // 调试开关（规范 #9/#10）：环境变量优先于配置，进程重启即生效，现场排障不必改文件。
@@ -945,6 +955,26 @@ fn run(args: &[String]) -> io::Result<()> {
             };
             // 并发接多台设备：每场会话独立线程，数据连接靠 txnId 找回自己的会话，
             // 不再按 accept 顺序关联（那会让第二台设备的控制连接被当成第一台的数据连接）
+            // v0.19：哈希缓存默认关；--verify 是本次运行的强制重算开关，优先于配置，
+            // 出问题时用它启动一次就能分清「跳过」来自缓存还是来自重新比对。
+            let force_rehash = args.iter().any(|a| a == "--verify");
+            let hash_cache = if cfg.hash_cache && !force_rehash {
+                let cache = Arc::new(tc_core::HashCache::load(&cache_path));
+                state.log(
+                    "info",
+                    &format!(
+                        "哈希缓存已启用（{} 条）：{}",
+                        cache.len(),
+                        cache_path.display()
+                    ),
+                );
+                Some(cache)
+            } else {
+                if cfg.hash_cache {
+                    state.log("info", "--verify：本次运行忽略哈希缓存，已有文件的指纹全部重算");
+                }
+                None
+            };
             let hub = Arc::new(
                 ReceiverHub::new(
                     Arc::new(acc),
@@ -957,6 +987,8 @@ fn run(args: &[String]) -> io::Result<()> {
                 .with_gate(gate)
                 // v0.15：并行流数来自配置，1 = 关闭
                 .with_streams(cfg.streams as u8)
+                // v0.19：None 时与旧版行为一致
+                .with_hash_cache(hash_cache)
                 // v0.16：可被发送方选择的落点；空表示只公布默认落点
                 .with_destinations(
                     cfg.destinations
@@ -1142,7 +1174,7 @@ fn run(args: &[String]) -> io::Result<()> {
             println!("  tc resend [--id ID|last] [--failed] [--history-dir DIR] [--pair-code CODE] [--identity DIR] [--retry] [--force] [--dest-id ID]");
             println!("  tc diag [--config FILE] [--identity DIR] [--out DIR] [--log FILE] [--history-dir DIR]");
             println!("  tc recv --listen IP:PORT --dest PATH [--identity DIR] [--pair-code CODE] [--trust-mode closed|open] [--root-map r0=NAME] [--streams N] [--announce]");
-            println!("  tc daemon --config FILE");
+            println!("  tc daemon --config FILE [--verify]");
             println!("  tc discover [--timeout SEC] [--identity DIR]");
             println!("  tc queue --dir DIR [--window MIN]");
             println!("  tc flush --dir DIR [--window MIN] [--history-dir DIR]");

@@ -66,6 +66,34 @@ fn isolate(path: &Path) -> io::Result<Option<PathBuf>> {
     Ok(Some(target))
 }
 
+/// v0.19：判断路径是否是程序自己生成的半成品（`.tcpart` 或它的 `.map`）。
+/// 删除只允许发生在这个白名单内，防止以后有人拿它当通用删除函数用。
+fn is_part_artifact(path: &Path) -> bool {
+    path.file_name()
+        .map(|n| {
+            let n = n.to_string_lossy();
+            n.ends_with(".tcpart") || n.ends_with(".map")
+        })
+        .unwrap_or(false)
+}
+
+/// v0.19：精准删除一个半成品残留（状态卡第 2 节 2.1 登记的删除例外）。
+/// 只接受调用方传进来的确切路径：不展开目录、不匹配通配符、不递归。
+/// 删除前先确认「是半成品文件名且确实存在」，每删一个都留一条带路径与原因的日志。
+fn remove_residue(path: &Path, reason: &str) {
+    if !is_part_artifact(path) {
+        eprintln!("WARN: 拒绝删除非半成品路径 {}", path.display());
+        return;
+    }
+    if !path.is_file() {
+        return;
+    }
+    match fs::remove_file(path) {
+        Ok(()) => eprintln!("INFO: v0.19 精准删除残留 {}（{reason}）", path.display()),
+        Err(e) => eprintln!("WARN: 残留删除失败 {}（{reason}）: {e}", path.display()),
+    }
+}
+
 /// 半成品文件 + 已收块位图。两者分开存，进程重启后能从位图直接算出缺口，不用重传整文件。
 pub struct PartFile {
     /// 只用于日志和错误信息。Android SAF 下这不是可访问的真实路径，只有 fd 可用。
@@ -88,6 +116,9 @@ pub struct PartFile {
     /// 收尾时不再整份重读；只有续传继承下来的块才需要回读校验。
     block_hashes: Vec<String>,
     verified_on_write: HashSet<u32>,
+    /// v0.19：块数 ≤ 1 的小文件不续传。续传最多省下一个块，留下的半成品却更碍事；
+    /// 这类文件失败后按状态卡 2.1 的例外精准删除，而不是像多块文件那样改名隔离。
+    no_resume: bool,
 }
 
 impl PartFile {
@@ -96,9 +127,14 @@ impl PartFile {
             fs::create_dir_all(parent)?;
         }
         let map_path = PathBuf::from(format!("{}.map", dest.to_string_lossy()));
-        // v0.17：先看旧位图身份。身份不符时把半成品与位图一起改名隔离，再按全新传输重建；
-        // 必须在打开 dest 之前做——Windows 下文件仍被句柄占用时无法改名。
-        if let Ok(text) = fs::read_to_string(&map_path) {
+        if entry.block_count() <= 1 {
+            // v0.19：一块以内的小文件不续传。上次失败留下的半成品与位图没有保留价值，
+            // 按状态卡 2.1 的例外精准删除这两个确切路径后整份重传（最多 8 MiB）。
+            // 必须在打开 dest 之前做——Windows 下文件仍被句柄占用时删不掉。
+            remove_residue(&map_path, "小文件不续传：上次留下的位图");
+            remove_residue(dest, "小文件不续传：上次留下的半成品");
+        } else if let Ok(text) = fs::read_to_string(&map_path) {
+            // v0.17：多块文件仍按位图身份决定能否续传；身份不符先改名隔离，不删除。
             if !text.trim().is_empty() && !bitmap_matches(&text, entry) {
                 // 隔离失败不阻断本次传输：最坏情况是覆盖旧半成品，但不会再信任旧位图
                 if let Err(e) = isolate(&map_path) {
@@ -139,8 +175,11 @@ impl PartFile {
         // 没有 v3 头或任何一项不符，一律视为不可用——宁可重传，也不能写坏用户文件。
         let mut received = HashSet::new();
         let mut map_usable = false;
+        // v0.19：小文件不续传。SAF 入口只有 fd、没有可删除的半成品路径，
+        // 所以这里只把旧位图当不可用，数据整份重收（最多一个块），随后重写位图头覆盖旧内容。
+        let no_resume = total_blocks <= 1;
         let text = fs::read_to_string(&map_path).unwrap_or_default();
-        if !text.trim().is_empty() {
+        if !no_resume && !text.trim().is_empty() {
             if bitmap_matches(&text, entry) {
                 let mut valid = true;
                 for line in text.lines().skip(1) {
@@ -200,6 +239,7 @@ impl PartFile {
             reopen_safe: false,
             block_hashes: entry.block_hashes.clone(),
             verified_on_write: HashSet::new(),
+            no_resume,
         })
     }
 
@@ -226,11 +266,23 @@ impl PartFile {
         }
     }
 
-    /// v0.17：校验失败时作废这个文件的半成品与位图——两者都改名隔离，不删除。
-    /// 否则坏块会被位图记为「已收」，下次重发继续跳过，永远校验不过。
-    /// SAF 场景半成品只有 fd、无法按路径改名，这里只隔离可写的位图。
+    /// v0.17：校验失败时作废这个文件的半成品与位图。
+    /// v0.19：小文件（≤1 块）例外——不续传，直接精准删除这两个确切路径（状态卡 2.1），
+    /// 因为重传成本最多一个块，留着半成品只是占空间；多块文件仍按 v0.17 改名隔离，可人工找回。
+    /// SAF 场景半成品只有 fd、无法按路径处理，这里只处理可写的位图。
     pub fn invalidate(&mut self) -> io::Result<()> {
         self.map_file = None;
+        if self.no_resume {
+            // 先释放句柄：Windows 下文件仍被打开时删不掉
+            if self.reopen_safe {
+                self.file = None;
+            }
+            remove_residue(&self.map_path, "小文件校验或落盘失败");
+            if self.reopen_safe {
+                remove_residue(&self.path, "小文件校验或落盘失败");
+            }
+            return Ok(());
+        }
         let mut first_err = None;
         if let Err(e) = isolate(&self.map_path) {
             first_err = Some(e);
@@ -444,6 +496,10 @@ pub trait Store {
     fn finalize_aside(&mut self, part: &mut PartFile, final_path: &Path) -> io::Result<String> {
         self.finalize(part, final_path)
     }
+
+    /// v0.19：收尾后把源文件的最后修改时间写回落盘文件。
+    /// 写不进去只记日志、不影响交付（时间不对不等于数据错），SAF 没有真实路径，默认什么都不做。
+    fn apply_mtime(&mut self, _final_path: &Path, _mtime: i64) {}
 }
 
 /// 默认后端：路径可用的一切平台（Windows / Linux / NAS）。
@@ -470,6 +526,23 @@ impl Store for PathStore {
             .finalize_aside(final_path)?
             .to_string_lossy()
             .to_string())
+    }
+
+    /// v0.19：改名的目标文件名可能因同名让位而带 `(n)`，所以按调用方传回的真实路径写时间。
+    /// 文件不存在说明这是 SAF 的伪标识，静默跳过，避免安卓端日志被警告刷满。
+    fn apply_mtime(&mut self, final_path: &Path, mtime: i64) {
+        if mtime < 0 || !final_path.is_file() {
+            return;
+        }
+        let when = UNIX_EPOCH + std::time::Duration::from_secs(mtime as u64);
+        let times = fs::FileTimes::new().set_modified(when);
+        let result = OpenOptions::new()
+            .write(true)
+            .open(final_path)
+            .and_then(|f| f.set_times(times));
+        if let Err(e) = result {
+            eprintln!("WARN: 写回文件时间失败 {}: {e}", final_path.display());
+        }
     }
 }
 
@@ -571,16 +644,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tc-store-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("a.bin.tcpart");
-        let entry = sample_entry(16);
+        // v0.19 起小文件不续传，这里必须用多块文件验证位图续传仍然有效
+        let entry = sample_entry(BLOCK_SIZE as u64 + 10);
         {
             let mut p = PartFile::open(&dest, &entry).unwrap();
-            assert!(p.missing().len() == 1);
-            p.write_block(0, &[7u8; 16]).unwrap();
+            assert_eq!(p.missing().len(), 2);
+            p.write_block(0, &vec![7u8; BLOCK_SIZE]).unwrap();
         }
-        // 重新打开应认为已收齐，不再请求任何块
+        // 重新打开应继承第 0 块，只差最后一块
         let p = PartFile::open(&dest, &entry).unwrap();
-        assert!(p.complete());
-        assert!(p.missing().is_empty());
+        assert!(!p.complete());
+        assert_eq!(p.missing(), vec![1]);
     }
 
     /// 模拟 Android SAF：文件由外部创建好，只把句柄交进来，位图落在另一个目录。
@@ -682,10 +756,36 @@ mod tests {
         assert_eq!(stale.len(), 2, "半成品与位图各留一份可找回的隔离副本");
     }
 
-    /// 校验失败时作废：invalidate 后半成品与位图都被改名，下一次打开必须从零开始。
+    /// 校验失败时作废：多块文件的 invalidate 仍按 v0.17 把半成品与位图改名隔离。
     #[test]
     fn invalidate_moves_part_and_bitmap_aside() {
         let dir = std::env::temp_dir().join(format!("tc-store-inv-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("a.bin.tcpart");
+        let map = PathBuf::from(format!("{}.map", dest.to_string_lossy()));
+        // 多块文件走隔离路径；小文件的删除路径见下一个用例
+        let entry = sample_entry(BLOCK_SIZE as u64 + 10);
+
+        let mut p = PartFile::open(&dest, &entry).unwrap();
+        p.write_block(0, &vec![7u8; BLOCK_SIZE]).unwrap();
+        p.invalidate().unwrap();
+        assert!(!dest.exists());
+        assert!(!map.exists());
+        let stale = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".stale-"))
+            .count();
+        assert_eq!(stale, 2, "多块文件仍要留下可人工找回的隔离副本");
+
+        let p = PartFile::open(&dest, &entry).unwrap();
+        assert_eq!(p.missing().len(), 2, "作废后不能继承旧进度");
+    }
+
+    /// v0.19：一块以内的小文件失败后精准删除残留，不产生 .stale 副本。
+    #[test]
+    fn small_file_failure_deletes_residue() {
+        let dir = std::env::temp_dir().join(format!("tc-store-small-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("a.bin.tcpart");
         let map = PathBuf::from(format!("{}.map", dest.to_string_lossy()));
@@ -694,11 +794,51 @@ mod tests {
         let mut p = PartFile::open(&dest, &entry).unwrap();
         p.write_block(0, &[7u8; 16]).unwrap();
         p.invalidate().unwrap();
-        assert!(!dest.exists());
-        assert!(!map.exists());
+        assert!(!dest.exists(), "小文件半成品必须被精准删除");
+        assert!(!map.exists(), "小文件位图必须被精准删除");
+        let stale = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".stale-"))
+            .count();
+        assert_eq!(stale, 0, "小文件不做改名隔离");
+    }
+
+    /// v0.19：小文件上次失败的残留会在下次打开时被精准删除，并从零开始收。
+    #[test]
+    fn small_file_starts_fresh_and_removes_old_residue() {
+        let dir = std::env::temp_dir().join(format!("tc-store-small2-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("a.bin.tcpart");
+        let map = PathBuf::from(format!("{}.map", dest.to_string_lossy()));
+        let entry = sample_entry(16);
+        // 伪造上次失败留下的半成品与位图（内容故意写坏，证明不会被信任）
+        fs::write(&dest, vec![9u8; 16]).unwrap();
+        fs::write(&map, format!("{MAP_HEADER} {BLOCK_SIZE} 16 {}\n0\n", entry.blake3)).unwrap();
 
         let p = PartFile::open(&dest, &entry).unwrap();
-        assert!(!p.complete(), "作废后不能继承旧进度");
+        assert_eq!(p.missing(), vec![0], "小文件必须整份重传");
+        let stale = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".stale-"))
+            .count();
+        assert_eq!(stale, 0, "删除而不是隔离");
+        // 打开后位图重建为本次身份的空头，旧块号不能被继承
+        let text = fs::read_to_string(&map).unwrap();
+        assert_eq!(text.lines().count(), 1, "只应剩头行");
+    }
+
+    /// v0.19 删除例外的防线：非半成品路径一律拒绝删除。
+    #[test]
+    fn remove_residue_refuses_non_artifact_paths() {
+        let dir = std::env::temp_dir().join(format!("tc-store-guard-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let user_file = dir.join("重要资料.txt");
+        fs::write(&user_file, b"keep me").unwrap();
+
+        remove_residue(&user_file, "测试");
+        assert!(user_file.exists(), "用户文件绝不能被这个入口删掉");
     }
 
     /// DONE 之后再次收到同名文件，必须完全重传，不能误续到旧进度。
@@ -719,6 +859,29 @@ mod tests {
         // 数据文件已被 rename 走；同名再来一次时应按全新会话重建，不能读成已收 0 块
         let p = PartFile::open(&dest, &entry).unwrap();
         assert_eq!(p.missing().len(), 3);
+    }
+
+    /// v0.19：收尾后把源修改时间写回目标文件；路径不存在（SAF 伪标识）时安全跳过。
+    #[test]
+    fn apply_mtime_writes_source_time() {
+        let dir = std::env::temp_dir().join(format!("tc-store-mtime-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("mtime.bin");
+        fs::write(&p, b"x").unwrap();
+
+        let mut store = PathStore;
+        store.apply_mtime(&p, 1_600_000_123);
+        let secs = fs::metadata(&p)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(secs, 1_600_000_123);
+
+        // 不存在的路径不能报错：安卓 SAF 交回来的可能是 URI 而不是真实路径
+        store.apply_mtime(&dir.join("not-a-real-path"), 1_600_000_123);
     }
 
     #[test]

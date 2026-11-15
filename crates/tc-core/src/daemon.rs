@@ -72,6 +72,11 @@ pub struct Config {
     /// v0.16：可被发送方选择的落点。空 = 只公布默认落点（旧行为）。
     /// 每个 path 都必须落在 allow 内，否则拒绝启动。
     pub destinations: Vec<DestConfig>,
+    /// v0.19：接收端哈希缓存（默认关）。开启后，已有文件在「路径 + 大小 + 修改时间」
+    /// 三项全对时直接采信缓存里的指纹，不再重读；内容变了但属性没变（如 cp -p 还原）
+    /// 会被误判为已存在、跳过不传，所以只作高级开关。
+    /// 缓存文件固定放在 config.toml 同目录的 `hash-cache.jsonl`。
+    pub hash_cache: bool,
 }
 
 /// v0.16：配置里的一个可选落点。id 是发送方唯一能传的东西，name 只用于界面显示。
@@ -112,6 +117,8 @@ impl Default for Config {
             streams: 4,
             // 默认不公布额外落点：旧配置与旧行为一致
             destinations: Vec::new(),
+            // 缓存开启会引入「属性没变就当没变」的漏传风险，默认关，由用户显式打开
+            hash_cache: false,
         }
     }
 }

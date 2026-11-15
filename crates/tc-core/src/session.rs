@@ -2,6 +2,7 @@ use crate::frame::{
     read_frame, read_full_block, read_message, write_frame, write_message, FrameHeader, FrameType,
     BLOCK_SIZE,
 };
+use crate::hashcache::HashCache;
 use crate::history::FailedFile;
 use crate::manifest::{local_device, DeviceInfo, Manifest};
 use crate::pathsafe::{ensure_within, sanitize_relative};
@@ -623,10 +624,15 @@ fn plan_layout(
 /// 那是静默丢数据；读一遍本地盘（SSD 上 GB/s 级）远比重传几 GB 划算，而且结论是确定的。
 /// 任何一步读失败都当成「没收到过」，退回普通传输——检查本身出错绝不能导致少传文件。
 /// 同名但内容不同的文件仍按原规则另起名字，不覆盖。
-fn already_present(final_paths: &[PathBuf], files: &[crate::manifest::FileEntry]) -> Vec<usize> {
+fn already_present(
+    final_paths: &[PathBuf],
+    files: &[crate::manifest::FileEntry],
+    cache: Option<&HashCache>,
+) -> Vec<usize> {
     // v0.18：按父目录分组，每个目录只 read_dir 一次，用文件名+大小建表；
     // 之前每个文件一次 metadata，10000 个小文件就是 10000 次往返。
     // SAF 的伪路径 read_dir 会失败，那一组退回逐文件判断，行为与旧版一致。
+    // v0.19：表里同时记修改时间，供哈希缓存判断「这个文件自上次算过之后没动过」。
     use std::collections::HashMap;
     let mut groups: HashMap<PathBuf, Vec<usize>> = HashMap::new();
     for i in 0..files.len() {
@@ -639,11 +645,11 @@ fn already_present(final_paths: &[PathBuf], files: &[crate::manifest::FileEntry]
     for (parent, indexes) in groups {
         match fs::read_dir(&parent) {
             Ok(rd) => {
-                let mut sizes: HashMap<std::ffi::OsString, u64> = HashMap::new();
+                let mut info: HashMap<std::ffi::OsString, (u64, i64)> = HashMap::new();
                 for entry in rd.flatten() {
                     if let Ok(meta) = entry.metadata() {
                         if meta.is_file() {
-                            sizes.insert(entry.file_name(), meta.len());
+                            info.insert(entry.file_name(), (meta.len(), mtime_secs(&meta)));
                         }
                     }
                 }
@@ -654,11 +660,10 @@ fn already_present(final_paths: &[PathBuf], files: &[crate::manifest::FileEntry]
                         Some(n) => n,
                         None => continue,
                     };
-                    if sizes.get(name) == Some(&f.size)
-                        && crate::hash::hash_file(path)
-                            .map(|(root, _)| root == f.blake3)
-                            .unwrap_or(false)
-                    {
+                    let Some(&(size, mtime)) = info.get(name) else {
+                        continue;
+                    };
+                    if size == f.size && same_as_manifest(cache, path, f, size, mtime) {
                         out.push(i);
                     }
                 }
@@ -671,9 +676,7 @@ fn already_present(final_paths: &[PathBuf], files: &[crate::manifest::FileEntry]
                     if let Ok(meta) = fs::metadata(path) {
                         if meta.is_file()
                             && meta.len() == f.size
-                            && crate::hash::hash_file(path)
-                                .map(|(root, _)| root == f.blake3)
-                                .unwrap_or(false)
+                            && same_as_manifest(cache, path, f, meta.len(), mtime_secs(&meta))
                         {
                             out.push(i);
                         }
@@ -684,6 +687,56 @@ fn already_present(final_paths: &[PathBuf], files: &[crate::manifest::FileEntry]
     }
     out.sort_unstable();
     out
+}
+
+/// 取「秒级修改时间」；取不到给 -1，表示这个文件永远不参与缓存命中（只能重算）。
+fn mtime_secs(meta: &fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(-1)
+}
+
+/// 落点文件是否与清单一致。
+/// 缓存只在「路径 + 大小 + 修改时间」全对时采信；没开缓存、没命中或指纹对不上，都老实重算。
+/// 任何读失败都当成「没收到过」——检查本身出错绝不能导致少传文件。
+/// v0.19：只有算出「确实一致」的文件才写进缓存，内容变过的文件下次必定重算。
+fn same_as_manifest(
+    cache: Option<&HashCache>,
+    path: &Path,
+    f: &crate::manifest::FileEntry,
+    size: u64,
+    mtime: i64,
+) -> bool {
+    if let Some(cache) = cache {
+        if mtime >= 0 {
+            if let Some(cached) = cache.get(path, size, mtime) {
+                return cached.eq_ignore_ascii_case(&f.blake3);
+            }
+        }
+    }
+    let ok = crate::hash::hash_file(path)
+        .map(|(root, _)| root == f.blake3)
+        .unwrap_or(false);
+    if ok && mtime >= 0 {
+        if let Some(cache) = cache {
+            cache.record(path, size, mtime, &f.blake3);
+        }
+    }
+    ok
+}
+
+/// v0.19：把刚校验通过的落盘文件记进缓存，下次重发同一目录可省掉重读。
+/// 时间取落盘后的真实值：源修改时间写回失败时若记清单里的时间，以后永远命中不了。
+fn record_received(cache: &HashCache, path: &Path, f: &crate::manifest::FileEntry) {
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+    let mtime = mtime_secs(&meta);
+    if mtime >= 0 {
+        cache.record(path, meta.len(), mtime, &f.blake3);
+    }
 }
 
 /// 发送端句柄缓存：固定容量 + 最久未用淘汰。
@@ -1509,6 +1562,8 @@ pub fn run_receiver_with_store_gate_streams(
         expected_pair_code,
         root_map,
         store,
+        // 单会话入口（CLI / Android 接收）没有 daemon 配置，不启用哈希缓存
+        None,
         &claims,
         peer_addr.as_deref(),
         SessionGate {
@@ -1792,6 +1847,8 @@ fn handle_session(
     expected_pair_code: Option<&str>,
     root_map: &HashMap<String, String>,
     store: &mut dyn Store,
+    // v0.19：接收端哈希缓存；None = 关闭（默认），保持逐文件重算指纹的旧行为。
+    cache: Option<&HashCache>,
     claims: &PathClaims,
     peer_addr: Option<&str>,
     gate: SessionGate<'_>,
@@ -1931,7 +1988,7 @@ fn handle_session(
     let skipped = if force {
         Vec::new()
     } else {
-        already_present(&layout.final_paths, &manifest.files)
+        already_present(&layout.final_paths, &manifest.files, cache)
     };
     let skipped_set: HashSet<usize> = skipped.iter().copied().collect();
     let skipped_bytes: u64 = skipped.iter().map(|&i| manifest.files[i].size).sum();
@@ -2193,21 +2250,32 @@ fn handle_session(
         }
         // v0.14：校验后立即释放句柄，避免收尾阶段几千个文件再次占满 fd
         part.close_handles();
-        if let Err(e) = if force {
+        let stored = if force {
             // 强制重传：先让旧文件改名让位，本次文件保留源文件名
             store.finalize_aside(&mut part, &layout.final_paths[i])
         } else {
             store.finalize(&mut part, &layout.final_paths[i])
-        } {
-            let reason = e.to_string();
-            failure = Some(format!("{}: {reason}", f.rel_path));
-            failed_files.push(FailedFile {
-                id: f.id.clone(),
-                rel_path: f.rel_path.clone(),
-                reason,
-                path: None,
-            });
-            break;
+        };
+        match stored {
+            Ok(path) => {
+                // v0.19：校验并改名成功后才写回源修改时间；写不进去只记日志，不影响交付
+                store.apply_mtime(Path::new(&path), f.mtime);
+                // v0.19：本次确认无误的文件记进缓存，下次重发同一目录可跳过重读
+                if let Some(cache) = cache {
+                    record_received(cache, Path::new(&path), f);
+                }
+            }
+            Err(e) => {
+                let reason = e.to_string();
+                failure = Some(format!("{}: {reason}", f.rel_path));
+                failed_files.push(FailedFile {
+                    id: f.id.clone(),
+                    rel_path: f.rel_path.clone(),
+                    reason,
+                    path: None,
+                });
+                break;
+            }
         }
     }
 
@@ -2273,6 +2341,8 @@ pub struct ReceiverHub {
     streams: u8,
     /// v0.16：可被发送方选择的落点；空 = 只公布默认项
     destinations: Vec<Destination>,
+    /// v0.19：哈希缓存；None = 关闭（默认）。多场会话共享同一份，读写由缓存内部的锁保护。
+    hash_cache: Option<Arc<HashCache>>,
 }
 
 impl ReceiverHub {
@@ -2296,6 +2366,7 @@ impl ReceiverHub {
             data_wait_secs: DATA_WAIT_SECS,
             streams: DEFAULT_STREAMS,
             destinations: Vec::new(),
+            hash_cache: None,
         }
     }
 
@@ -2314,6 +2385,12 @@ impl ReceiverHub {
     /// 注入信任门禁。必须在 `Arc::new` 之前调用，之后 hub 会被多个线程共享。
     pub fn with_gate(mut self, gate: Arc<TrustGate>) -> Self {
         self.gate = Some(gate);
+        self
+    }
+
+    /// v0.19：注入哈希缓存。默认不注入＝关闭；开启后同一目录重发可省掉已有文件的指纹重算。
+    pub fn with_hash_cache(mut self, cache: Option<Arc<HashCache>>) -> Self {
+        self.hash_cache = cache;
         self
     }
 
@@ -2451,6 +2528,8 @@ impl ReceiverHub {
             self.expected_pair_code.as_deref(),
             &self.root_map,
             &mut store,
+            // v0.19：缓存按配置注入；None 时行为与 v0.18 完全一致
+            self.hash_cache.as_deref(),
             &self.claims,
             peer_addr.as_deref(),
             SessionGate {
@@ -2509,6 +2588,54 @@ mod tests {
         assert_eq!(effective_streams(4, &[], 100, None), 1, "对端没声明必须单流");
         assert_eq!(effective_streams(4, &caps, 100, Some(1)), 1, "模拟中断必须单流");
         assert_eq!(effective_streams(99, &caps, 100, None), MAX_STREAMS);
+    }
+
+    /// v0.19：缓存只在路径 + 大小 + 修改时间全对时采信；没命中就重算，重算结果才写进缓存。
+    #[test]
+    fn hash_cache_hit_skips_rehash_and_mismatch_falls_back() {
+        let dir = std::env::temp_dir().join(format!("tc-session-cache-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.bin");
+        fs::write(&file, b"hello cache").unwrap();
+        let (root, block_hashes) = crate::hash::hash_file(&file).unwrap();
+        let entry = crate::manifest::FileEntry {
+            id: "f0".into(),
+            root_id: "r0".into(),
+            rel_path: "a.bin".into(),
+            size: 11,
+            mtime: 0,
+            mode: 0o644,
+            blake3: root,
+            block_hashes,
+        };
+        let meta = fs::metadata(&file).unwrap();
+        let mtime = mtime_secs(&meta);
+        assert!(mtime >= 0);
+        let cache = HashCache::load(&dir.join("hash-cache.jsonl"));
+
+        // 首次没有缓存：重算后判定一致，并把结果记进缓存
+        assert!(same_as_manifest(Some(&cache), &file, &entry, 11, mtime));
+        assert_eq!(
+            cache.get(&file, 11, mtime).as_deref(),
+            Some(entry.blake3.as_str())
+        );
+
+        // 内容改掉但把大小与时间恢复成原值：缓存会命中——这正是默认关闭它的原因
+        fs::write(&file, b"HELLO CACHE").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
+        f.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime as u64)),
+        )
+        .unwrap();
+        drop(f);
+        assert!(
+            same_as_manifest(Some(&cache), &file, &entry, 11, mtime),
+            "属性没变时缓存会采信"
+        );
+
+        // 时间变了就不再命中，必须重算；此时内容已不同，结果应为不一致
+        assert!(!same_as_manifest(Some(&cache), &file, &entry, 11, mtime + 1));
     }
 
     /// 小文件多时必须封顶：旧实现只插不删，句柄数会跟着文件数一路涨到 FD 上限。

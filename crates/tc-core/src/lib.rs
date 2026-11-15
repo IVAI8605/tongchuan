@@ -7,6 +7,7 @@ pub mod diag;
 pub mod discover;
 pub mod frame;
 pub mod hash;
+pub mod hashcache;
 pub mod history;
 pub mod manifest;
 pub mod pathsafe;
@@ -21,6 +22,7 @@ pub mod trust;
 pub mod web;
 
 pub use frame::{FrameHeader, FrameType, BLOCK_SIZE};
+pub use hashcache::HashCache;
 pub use manifest::{build_manifest, build_manifest_with_progress, DeviceInfo, FileEntry, Manifest, Root};
 pub use session::{
     list_destinations, list_destinations_for, protocol_compatible, run_receiver, run_receiver_on,

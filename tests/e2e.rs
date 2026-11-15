@@ -111,6 +111,79 @@ fn interrupted_transfer_resumes_from_bitmap() {
     );
 }
 
+/// v0.19：单块小文件不续传。上次失败留下的半成品与位图必须在重传前被精准删除，
+/// 本次从零重收，成功后目录里不留 `.tcpart` / `.map` / `.stale` 副本。
+#[test]
+fn small_file_restarts_instead_of_resuming() {
+    let root = test_dir("small-retry");
+    let src = root.join("src/小文件");
+    let data = vec![0x21u8; 4096]; // 一块以内
+    write_file(&src.join("tiny.bin"), &data);
+    let dest = root.join("recv");
+    fs::create_dir_all(&dest).unwrap();
+
+    // 伪造上次失败留下的残留：半成品内容写坏、位图声称收过第 0 块。
+    // 小文件不走续传，这两份都应被精准删除后整份重收。
+    let dir = dest.join("小文件");
+    fs::create_dir_all(&dir).unwrap();
+    let part = dir.join("tiny.bin.tcpart");
+    let map = PathBuf::from(format!("{}.map", part.to_string_lossy()));
+    fs::write(&part, vec![0xffu8; 4096]).unwrap();
+    fs::write(&map, "0\n").unwrap();
+
+    let (listener, addr) = listener_and_addr();
+    let dest2 = dest.clone();
+    let recv = thread::spawn(move || run_receiver_on(listener, &dest2, None).unwrap());
+    let send = run_sender(&addr, &[src]).unwrap();
+    let report = recv.join().unwrap();
+
+    assert!(report.verified);
+    assert_eq!(report.resumed_blocks, 0, "小文件必须整份重传");
+    assert_eq!(report.blocks_written, 1);
+    assert_eq!(send.verdict, "OK");
+    assert_eq!(fs::read(dir.join("tiny.bin")).unwrap(), data);
+    assert!(!part.exists(), "成功后不应残留半成品");
+    assert!(!map.exists(), "成功后不应残留位图");
+    let stale = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".stale-"))
+        .count();
+    assert_eq!(stale, 0, "小文件失败走精准删除，不做改名隔离");
+}
+
+/// v0.19：落盘文件的修改时间应等于源文件的修改时间，而不是「收到的时间」。
+#[test]
+fn received_file_keeps_source_mtime() {
+    let root = test_dir("mtime");
+    let src = root.join("src/时间");
+    let file_path = src.join("stamp.txt");
+    write_file(&file_path, b"mtime check");
+    let stamp = 1_500_000_000u64;
+    let when = std::time::UNIX_EPOCH + Duration::from_secs(stamp);
+    let f = fs::OpenOptions::new().write(true).open(&file_path).unwrap();
+    f.set_times(fs::FileTimes::new().set_modified(when)).unwrap();
+    drop(f);
+
+    let dest = root.join("recv");
+    fs::create_dir_all(&dest).unwrap();
+    let (listener, addr) = listener_and_addr();
+    let dest2 = dest.clone();
+    let recv = thread::spawn(move || run_receiver_on(listener, &dest2, None).unwrap());
+    let send = run_sender(&addr, &[src]).unwrap();
+    assert!(recv.join().unwrap().verified);
+    assert_eq!(send.verdict, "OK");
+
+    let got = fs::metadata(dest.join("时间/stamp.txt"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(got, stamp, "接收端必须把源修改时间写回去");
+}
+
 /// v0.17：续传时发现半成品数据坏了，必须作废旧位图；下一次重发从零开始并成功。
 /// 这是「校验失败 → 位图仍被信任 → 永久失败」那条死循环的回归用例。
 #[test]
