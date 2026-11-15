@@ -428,7 +428,12 @@ fn send_with_retry(
                 // 不可重试的错误（配对码、未信任、版本）立刻返回；次数用完也返回，但要留一句结论
                 if attempt >= delays.len() || !tc_core::retry::is_retryable(&e) {
                     if retry && attempt > 0 {
-                        println!("RETRY gave_up attempts={} reason={}", attempt + 1, e);
+                        println!(
+                            "RETRY gave_up attempts={} class={} reason={}",
+                            attempt + 1,
+                            tc_core::retry::classify(&e).label_zh(),
+                            e
+                        );
                     }
                     return Err(e);
                 }

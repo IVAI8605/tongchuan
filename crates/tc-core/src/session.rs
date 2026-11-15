@@ -1728,7 +1728,14 @@ fn write_block_to(
         .get(&file_idx)
         .ok_or_else(|| io_err("part not opened for this file"))?;
     let mut part = lock_part(part);
-    part.write_block(block_idx, payload)?;
+    // 写盘失败按类别写清原因：磁盘满/无权限与网络抖动不是一回事，重试无意义，
+    // 本地日志里直接点明，排障时一眼看出该扩容还是该查权限。
+    part.write_block(block_idx, payload).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("写盘失败（{}）：{e}", crate::retry::classify(&e).label_zh()),
+        )
+    })?;
     part.close_handles();
     Ok(())
 }
