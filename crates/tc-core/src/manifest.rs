@@ -387,4 +387,56 @@ mod tests {
         };
         assert_eq!(e.block_count(), 0);
     }
+
+    fn plan_test_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tc-manifest-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 目录 → 自身根；同父目录的多个文件合并成「以父目录名为根」的一个根。
+    #[test]
+    fn plan_roots_keeps_dirs_and_groups_files_by_parent() {
+        let base = plan_test_dir("plan");
+        let album = base.join("相册");
+        fs::create_dir_all(&album).unwrap();
+        fs::write(album.join("a.jpg"), b"a").unwrap();
+        fs::write(album.join("b.jpg"), b"b").unwrap();
+        fs::create_dir_all(base.join("视频")).unwrap();
+        fs::write(base.join("note.txt"), b"n").unwrap();
+
+        let specs = plan_roots(&[
+            album.join("a.jpg"),
+            album.join("b.jpg"),
+            base.join("note.txt"),
+            base.join("视频"),
+        ])
+        .unwrap();
+
+        // 相册：两个文件合并进同一个根，预置清单有两条
+        let album_spec = specs.iter().find(|(n, _, _)| n == "相册").unwrap();
+        assert_eq!(album_spec.1, album);
+        let mut names: Vec<&str> = album_spec.2.iter().map(|(n, _)| n.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["a.jpg", "b.jpg"]);
+
+        // note.txt：以父目录名（base 的文件名）为根，预置清单只有它自己
+        let base_name = base.file_name().unwrap().to_string_lossy().to_string();
+        let note_spec = specs.iter().find(|(n, _, _)| *n == base_name).unwrap();
+        assert_eq!(note_spec.2.len(), 1);
+        assert_eq!(note_spec.2[0].0, "note.txt");
+
+        // 空目录：作为目录根，预置文件清单为空（后续递归由调用方做）
+        let video_spec = specs.iter().find(|(n, _, _)| n == "视频").unwrap();
+        assert!(video_spec.2.is_empty());
+    }
+
+    /// 既不是文件也不是目录的路径必须明确报错，而不是被静默忽略。
+    #[test]
+    fn plan_roots_rejects_missing_path() {
+        let base = plan_test_dir("plan-missing");
+        let err = plan_roots(&[base.join("不存在的文件")]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
 }
