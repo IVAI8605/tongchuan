@@ -5,22 +5,32 @@
 # 所以这里保持 Continue，每一步靠 $LASTEXITCODE 显式判定。
 $ErrorActionPreference = 'Continue'
 
+# 2026-11-15 跨平台适配：Windows 产物带 .exe，Linux 无后缀；Join-Path 不会把字面反斜杠当分隔符，
+# 所以含多级路径的字面量统一走 JP() 归一，Windows 行为保持不变（反斜杠归一后仍是反斜杠）。
+$isWin = if (Test-Path Variable:IsWindows) { $IsWindows } else { $true }
+$sep = [System.IO.Path]::DirectorySeparatorChar
+function JP([string]$base, [string]$child) { Join-Path $base ($child -replace '\\', [string]$sep) }
+function JP2([string]$a, [string]$b, [string]$c) { JP (JP $a $b) $c }
+
 # cargo 不一定在 PATH（-NoProfile 环境尤其常见）：先查 PATH，再退到用户级安装目录
 $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
-if (-not $cargo) { $cargo = Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe' }
+if (-not $cargo) {
+    $cargo = if ($isWin) { JP $env:USERPROFILE '.cargo\bin\cargo.exe' } else { JP $env:HOME '.cargo/bin/cargo' }
+}
 if (-not (Test-Path $cargo)) { Write-Output "FAIL: 找不到 cargo（$cargo）"; exit 1 }
 $root = Split-Path -Parent $PSScriptRoot
 $manifest = Join-Path $root 'Cargo.toml'
 # 产物目录与 .cargo/config.toml 的 target-dir 同一相对位置：仓库上一级的 tongchuan-target。
 # 不能用项目内的 target/：项目目录含中文，ring 的 ar 处理不了，所以构建缓存统一放在仓库外。
 $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path (Split-Path -Parent $root) 'tongchuan-target' }
-$tc = Join-Path $targetDir 'release\tc.exe'
+$tcName = if ($isWin) { 'tc.exe' } else { 'tc' }
+$tc = JP2 $targetDir 'release' $tcName
 $env:CARGO_TARGET_DIR = $targetDir
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 # 验证产物落在项目内的 cache 下：桌面属于用户自己的桌面，不该被脚本往里写东西
 # 2026-11-13 重构：临时目录由 .tmp\ 改名为 cache\（规范第 2 节等价目录默认名），.gitignore 同步为 /cache/
 $tmpBase = Join-Path $root 'cache'
-$tmp = Join-Path $tmpBase "通传-验证\$stamp"
+$tmp = JP $tmpBase "通传-验证\$stamp"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $env:TC_TEST_DIR = $tmpBase
 
@@ -46,15 +56,15 @@ if ($results[0] -eq 'BUILD   PASS') {
 
 # 3) 命令行级 TLS 回环：验证身份生成、指纹固定、配对码、加密传输、落盘确实能跑通
 if ($results[0] -eq 'BUILD   PASS') {
-    $src = Join-Path $tmp 'cli\src\项目A'
-    $dest = Join-Path $tmp 'cli\recv'
-    $idDir = Join-Path $tmp 'cli\identity'
-    $queueDir = Join-Path $tmp 'cli\queue'
+    $src = JP2 $tmp 'cli' 'src\项目A'
+    $dest = JP2 $tmp 'cli' 'recv'
+    $idDir = JP2 $tmp 'cli' 'identity'
+    $queueDir = JP2 $tmp 'cli' 'queue'
     # 历史落点显式指到 .tmp 内，避免验证时往用户真实的历史目录里写
-    $historyDir = Join-Path $tmp 'cli\history'
-    New-Item -ItemType Directory -Force -Path (Join-Path $src 'src') | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $src 'docs\img') | Out-Null  # 空目录
-    [System.IO.File]::WriteAllText((Join-Path $src 'src\main.rs'), 'fn main() {}')
+    $historyDir = JP2 $tmp 'cli' 'history'
+    New-Item -ItemType Directory -Force -Path (JP $src 'src') | Out-Null
+    New-Item -ItemType Directory -Force -Path (JP $src 'docs\img') | Out-Null  # 空目录
+    [System.IO.File]::WriteAllText((JP $src 'src\main.rs'), 'fn main() {}')
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
     # 先取一个空闲端口，避免与已装的 LocalSend(53317) 或别的进程冲突
@@ -88,8 +98,8 @@ if ($results[0] -eq 'BUILD   PASS') {
     $trustOut = (& $tc trust list --identity $idDir 2>&1 | Out-String)
     $trustListed = $fp -ne '' -and [bool]($trustOut -match $fp)
 
-    $expected = Join-Path $dest '项目A\src\main.rs'
-    $emptyDir = Join-Path $dest '项目A\docs\img'
+    $expected = JP2 $dest '项目A' 'src\main.rs'
+    $emptyDir = JP2 $dest '项目A' 'docs\img'
     if ($sendExit -eq 0 -and $exited -and $fp -ne '' -and $sendOut -match 'verdict=OK' -and $recvText -match 'verified=True' -and $trustListed -and (Test-Path $expected) -and (Test-Path $emptyDir)) {
         $results += 'CLI     PASS'
     } else {
@@ -139,7 +149,7 @@ auto_accept = true
     }
     # 5.4 起除 /api/health 外都要令牌（X-TC-Token），页面走 ?t=。
     # 脚本不带令牌会被一律 401，表现为 MANAGE/TRUST 假 FAIL；令牌由 daemon 首次启动生成在 identity 下。
-    $tokPath = Join-Path $daDir 'identity\manage.token'
+    $tokPath = JP $daDir 'identity\manage.token'
     $tok = if (Test-Path $tokPath) { (Get-Content $tokPath -Raw).Trim() } else { '' }
     $hh = @{ 'X-TC-Token' = $tok }
     try {
@@ -164,7 +174,7 @@ auto_accept = true
 }
 
 # 5) Windows 外壳脚本产物完整、PowerShell 语法可解析、含中文脚本带 BOM
-$winDir = Join-Path $root 'scripts\windows'
+$winDir = JP $root 'scripts\windows'
 $scriptFiles = @('install.ps1', 'uninstall.ps1', 'tray.ps1')
 $scriptOk = $true
 foreach ($f in $scriptFiles) {
@@ -177,7 +187,7 @@ foreach ($f in $scriptFiles) {
     if ($errs.Count -gt 0) { $scriptOk = $false }
 }
 # 配置模板与部署 unit 自 2026-11-13 起归 configs\（规范 S8：配置模板放 configs\）
-foreach ($f in @('installer.nsi', (Join-Path $root 'configs\tongchuan.service'), (Join-Path $root 'configs\config.example.toml'))) {
+foreach ($f in @('installer.nsi', (JP $root 'configs\tongchuan.service'), (JP $root 'configs\config.example.toml'))) {
     $p = if ([System.IO.Path]::IsPathRooted($f)) { $f } else { Join-Path $winDir $f }
     if (-not (Test-Path $p)) { $scriptOk = $false }
 }
