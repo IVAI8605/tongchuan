@@ -47,7 +47,9 @@ pub fn pending(dir: &Path, window_minutes: i64) -> io::Result<Vec<(PathBuf, Queu
         return Ok(Vec::new());
     }
     let now = now_secs();
-    let cutoff = now - window_minutes * 60;
+    // 饱和运算：窗口分钟数来自配置，写成极大值或负数时 `now - window*60` 会溢出并在
+    // debug 构建里 panic。溢出时按最宽松处理（把所有未完成任务都列出），宁可多补发也不崩。
+    let cutoff = now.saturating_sub(window_minutes.saturating_mul(60));
     let mut out = Vec::new();
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
@@ -116,5 +118,23 @@ mod tests {
         // 文件一个都没删
         assert!(p_fresh.exists());
         assert!(p_old.exists());
+    }
+
+    /// 窗口分钟数写成极大值或负数时不能溢出 panic：极大窗口把未完成任务全列出，负数窗口按原语义过滤。
+    #[test]
+    fn extreme_window_minutes_do_not_overflow() {
+        let dir = std::env::temp_dir().join(format!("tc-queue-overflow-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let fresh = task(0);
+        let old = task(11 * 60);
+        save(&dir, &fresh).unwrap();
+        save(&dir, &old).unwrap();
+
+        // i64::MAX 分钟会把 cutoff 压到下界，未完成任务都应被列出而不是崩溃
+        let list = pending(&dir, i64::MAX).unwrap();
+        assert_eq!(list.len(), 2);
+
+        // 负数窗口维持旧语义（cutoff 落在未来，全部过滤），同样不应 panic
+        assert!(pending(&dir, -5).unwrap().is_empty());
     }
 }
