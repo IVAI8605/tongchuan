@@ -5,7 +5,9 @@ param(
     [string]$TcPath = '',
     [string]$Config = '',
     [string]$ManageUrl = 'http://127.0.0.1:53319',
-    [switch]$Headless
+    [switch]$Headless,
+    # v0.13.3：双击桌面图标时带上它，启动（或发现已在运行）后直接打开管理页
+    [switch]$OpenUi
 )
 $ErrorActionPreference = 'Continue'
 # 默认路径要同时认两种布局：仓库是 scripts\windows\tray.ps1，安装版是 scripts\tray.ps1。
@@ -17,12 +19,53 @@ if (-not $Config) { $Config = Join-Path $appRoot 'config.toml' }
 if (-not (Test-Path $TcPath)) { Write-Output "ERROR tc.exe not found: $TcPath"; exit 1 }
 if (-not (Test-Path $Config)) { Write-Output "ERROR config.toml not found: $Config"; exit 1 }
 
+# 管理页要令牌：直接打开只会得到 401 提示页。令牌文件在 identity 目录下，
+# 这里读出来拼进 ?t=，点一下就进得去（令牌只出现在浏览器地址栏，不写日志）。
+# 这两个函数必须定义在单实例判断之前：双击图标时托盘往往已经在跑，
+# 第二个实例要先把页面打开再退出（v0.13.3）。
+$appDir = Split-Path -Parent $TcPath
+function Get-ManageUrl {
+    $idDir = $null
+    if (Test-Path $Config) {
+        $m = Select-String -Path $Config -Pattern '^\s*identity_dir\s*=\s*''(.+)''' | Select-Object -First 1
+        if ($m) {
+            $idDir = $m.Matches[0].Groups[1].Value
+            # 配置里的相对路径按配置文件所在目录展开，与 CLI 的解析口径保持一致
+            if (-not [System.IO.Path]::IsPathRooted($idDir)) {
+                $idDir = Join-Path (Split-Path -Parent $Config) $idDir
+            }
+        }
+    }
+    if (-not $idDir) { $idDir = Join-Path $appDir 'identity' }
+    $tokenPath = Join-Path $idDir 'manage.token'
+    if (Test-Path $tokenPath) {
+        $tok = (Get-Content $tokenPath -Raw).Trim()
+        if ($tok) { return "$ManageUrl/?t=$tok" }
+    }
+    return $ManageUrl
+}
+
+# 等 daemon 就绪再开页面：刚双击时进程可能还在初始化，立刻打开会看到连接被拒
+function Open-ManagePage {
+    for ($i = 0; $i -lt 20; $i++) {
+        try {
+            $null = Invoke-RestMethod -Uri "$ManageUrl/api/health" -TimeoutSec 2
+            break
+        } catch {
+            Start-Sleep -Milliseconds 300
+        }
+    }
+    Start-Process (Get-ManageUrl)
+}
+
 # 单实例：桌面快捷方式和登录自启动可能同时触发，只允许一个托盘 + 一个 daemon。
 # 命名互斥量在进程退出时自动释放，不需要额外清理。
 $isFirst = $false
 $mutex = New-Object System.Threading.Mutex($true, 'Local\TongchuanTray', [ref]$isFirst)
 if (-not $isFirst) {
     Write-Output 'ALREADY_RUNNING 已有托盘实例，本次不重复启动'
+    # 双击桌面图标时托盘通常已经在跑：此时仍要把管理页打开，否则双击看起来没反应
+    if ($OpenUi) { Open-ManagePage }
     exit 0
 }
 
@@ -42,6 +85,8 @@ if ($reuse) {
     Write-Output ("DAEMON_PID " + $ownDaemon.Id)
 }
 $daemon = $ownDaemon
+# 双击桌面图标：daemon 起完（或复用已有）就把管理页拉到浏览器
+if ($OpenUi) { Open-ManagePage }
 
 # 右键子菜单的槽位来源：优先用发送历史里的目标（带当时的指纹），
 # 这样对端这次没被发现在线也照样能发；发现列表只用来给槽位补上好认的名字。
@@ -193,28 +238,6 @@ try {
     $notify.Icon = [System.Drawing.SystemIcons]::Application
 }
 $notify.Text = '通传 · 后台接收中'
-# 管理页要令牌：直接打开只会得到 401 提示页。令牌文件在 identity 目录下，
-# 这里读出来拼进 ?t=，点一下就进得去（令牌只出现在浏览器地址栏，不写日志）。
-function Get-ManageUrl {
-    $idDir = $null
-    if (Test-Path $Config) {
-        $m = Select-String -Path $Config -Pattern '^\s*identity_dir\s*=\s*''(.+)''' | Select-Object -First 1
-        if ($m) {
-            $idDir = $m.Matches[0].Groups[1].Value
-            # 配置里的相对路径按配置文件所在目录展开，与 CLI 的解析口径保持一致
-            if (-not [System.IO.Path]::IsPathRooted($idDir)) {
-                $idDir = Join-Path (Split-Path -Parent $Config) $idDir
-            }
-        }
-    }
-    if (-not $idDir) { $idDir = Join-Path $appDir 'identity' }
-    $tokenPath = Join-Path $idDir 'manage.token'
-    if (Test-Path $tokenPath) {
-        $tok = (Get-Content $tokenPath -Raw).Trim()
-        if ($tok) { return "$ManageUrl/?t=$tok" }
-    }
-    return $ManageUrl
-}
 
 $ctx = New-Object System.Windows.Forms.ContextMenu
 $openItem = $ctx.MenuItems.Add('打开管理页')

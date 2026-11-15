@@ -21,6 +21,10 @@ pub struct Announcement {
     pub port: u16,
     pub version: String,
     pub ts: i64,
+    /// v0.13.3：这条是「回执」而不是广播。收到回执的一方不再回执，避免两台设备无限乒乓。
+    /// 旧版本没有这个字段，反序列化时按 false 处理。
+    #[serde(default)]
+    pub reply: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +33,8 @@ pub struct Peer {
     pub fingerprint: String,
     pub name: String,
     pub platform: String,
+    /// 这条公告是不是对端发来的回执（回执不再回执，见 reply_to）
+    pub reply: bool,
 }
 
 pub fn encode(a: &Announcement) -> io::Result<Vec<u8>> {
@@ -70,6 +76,7 @@ pub fn announcement_for(
         port,
         version: version.into(),
         ts: crate::queue::now_secs(),
+        reply: false,
     }
 }
 
@@ -246,7 +253,7 @@ fn bind_shared(port: u16) -> io::Result<UdpSocket> {
 pub fn listen(timeout: Duration, self_fingerprint: &str) -> io::Result<Vec<Peer>> {
     let mut seen: HashMap<String, Peer> = HashMap::new();
     // 复用同一套绑定与解码逻辑，避免两条路径对「什么算一台设备」判断不一致
-    listen_each(timeout, self_fingerprint, |p| {
+    listen_each(timeout, self_fingerprint, |p, _from| {
         seen.insert(p.addr.clone(), p.clone());
     })?;
     Ok(seen.into_values().collect())
@@ -254,12 +261,28 @@ pub fn listen(timeout: Duration, self_fingerprint: &str) -> io::Result<Vec<Peer>
 
 /// 边收边回调：每收到一条有效公告就交给调用方处理，供守护进程即时更新设备列表。
 /// 常驻端不能用 listen 的「窗口结束才返回」——那样新设备最多要等一整轮窗口才出现在管理页。
+/// 第二个参数是发来公告的地址，调用方可以据此单播回执（见 reply_to）。
 pub fn listen_each(
     timeout: Duration,
     self_fingerprint: &str,
-    mut on_peer: impl FnMut(&Peer),
+    mut on_peer: impl FnMut(&Peer, SocketAddr),
 ) -> io::Result<()> {
     listen_on_each(DISCOVERY_PORT, timeout, self_fingerprint, &mut on_peer)
+}
+
+/// 收到公告后单播回执一份自己的公告。
+/// 为什么需要它：多网卡或开了 VPN 时，广播通常只从默认路由那块网卡发出，
+/// 另一块网卡上的设备就永远收不到；反过来单播是走对方 IP 的直连路由，能绕开这个限制。
+/// 只给「已经证明能到我这」的来源回执，不会额外制造广播风暴。
+pub fn reply_to(from: SocketAddr, a: &Announcement) {
+    // 标记成「回执」：对端收到后不会再回，避免两台设备每几秒对轰一轮
+    let mut r = a.clone();
+    r.reply = true;
+    if let Ok(payload) = encode(&r) {
+        if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
+            let _ = sock.send_to(&payload, SocketAddr::new(from.ip(), DISCOVERY_PORT));
+        }
+    }
 }
 
 /// 指定端口监听，仅供测试：正式路径固定 53318，测试用独立端口避免受本机旧版守护进程影响
@@ -267,7 +290,7 @@ pub fn listen_each(
 #[cfg(test)]
 fn listen_on(port: u16, timeout: Duration, self_fingerprint: &str) -> io::Result<Vec<Peer>> {
     let mut seen: HashMap<String, Peer> = HashMap::new();
-    listen_on_each(port, timeout, self_fingerprint, &mut |p: &Peer| {
+    listen_on_each(port, timeout, self_fingerprint, &mut |p: &Peer, _from| {
         seen.insert(p.addr.clone(), p.clone());
     })?;
     Ok(seen.into_values().collect())
@@ -277,7 +300,7 @@ fn listen_on_each(
     port: u16,
     timeout: Duration,
     self_fingerprint: &str,
-    on_peer: &mut dyn FnMut(&Peer),
+    on_peer: &mut dyn FnMut(&Peer, SocketAddr),
 ) -> io::Result<()> {
     // v0.12：发现监听必须能和常驻进程共用一个端口。桌面守护进程一直在听 53318，
     // 命令行 `tc discover`、e2e 用例再听一次就会 AddrInUse（v0.11 之前跑门禁得先退托盘）。
@@ -308,12 +331,16 @@ fn listen_on_each(
                         SocketAddr::V6(_) => continue,
                     };
                     let addr = format!("{ip}:{}", a.port);
-                    on_peer(&Peer {
-                        addr,
-                        fingerprint: a.fingerprint.clone(),
-                        name: a.device.name.clone(),
-                        platform: a.device.platform.clone(),
-                    });
+                    on_peer(
+                        &Peer {
+                            addr,
+                            fingerprint: a.fingerprint.clone(),
+                            name: a.device.name.clone(),
+                            platform: a.device.platform.clone(),
+                            reply: a.reply,
+                        },
+                        from,
+                    );
                 }
             }
             Err(e)
@@ -365,6 +392,7 @@ mod tests {
             port: 53318,
             version: "0.2.0".into(),
             ts: 1,
+            reply: false,
         };
         let bytes = encode(&a).unwrap();
         let back = decode(&bytes).unwrap();
@@ -385,6 +413,7 @@ mod tests {
             port: 53318,
             version: "0.4.0".into(),
             ts: 1,
+            reply: false,
         };
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
@@ -420,6 +449,7 @@ mod tests {
             port: 53318,
             version: "0.12.0".into(),
             ts: 1,
+            reply: false,
         };
         let h1 = std::thread::spawn(move || listen_on(port, Duration::from_millis(2500), ""));
         let h2 = std::thread::spawn(move || listen_on(port, Duration::from_millis(2500), ""));

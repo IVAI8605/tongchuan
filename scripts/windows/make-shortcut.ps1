@@ -24,8 +24,9 @@ foreach ($p in @($TcPath, $Config, $tray)) {
 }
 
 # 用系统自带的 Windows PowerShell 5.1：目标机器上一定有，不依赖 pwsh 7
+# v0.13.3：快捷方式带 -OpenUi，双击后除了保证后台在跑，还会直接把管理页拉到浏览器
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$psArgs = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -TcPath "{1}" -Config "{2}"' -f $tray, $TcPath, $Config
+$psArgs = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -TcPath "{1}" -Config "{2}" -OpenUi' -f $tray, $TcPath, $Config
 
 function New-Lnk([string]$path) {
     $shell = New-Object -ComObject WScript.Shell

@@ -326,6 +326,7 @@ fn discovery_announce_is_received() {
         port: 53318,
         version: "0.2.0".into(),
         ts: queue::now_secs(),
+        reply: false,
     };
     let own = own_fp.clone();
     let listener =

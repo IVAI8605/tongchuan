@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "tc-core"
-version = "0.13.2"
+version = "0.13.3"
 dependencies = [
  "blake3",
  "rcgen",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "tc-jni"
-version = "0.13.2"
+version = "0.13.3"
 dependencies = [
  "jni",
  "serde_json",
@@ -512,7 +512,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "tongchuan"
-version = "0.13.2"
+version = "0.13.3"
 dependencies = [
  "tc-core",
 ]

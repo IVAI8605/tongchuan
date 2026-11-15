@@ -737,29 +737,50 @@ fn run(args: &[String]) -> io::Result<()> {
                     port_of(&cfg.listen),
                     env!("CARGO_PKG_VERSION"),
                 );
-                thread::spawn(move || discover::announce_forever(ann, Duration::from_secs(5)));
-            }
-            {
+                // 回执用同一份公告：收到别人的广播后单播回一份，解决多网卡/VPN 下广播只走默认路由的问题
+                let ann_reply = ann.clone();
                 let st = state.clone();
                 let self_fp = fp.clone();
-                thread::spawn(move || loop {
-                    // v0.13.1：收到即写进设备列表。旧实现要等 30 秒窗口结束才批量更新，
-                    // 管理页打开时常常是空的，看起来像「发现不到设备」。
-                    let r = discover::listen_each(Duration::from_secs(30), &self_fp, |p| {
-                        // 只记设备名与地址；指纹属设备唯一标识，按规范 #14 不落原文
-                        st.log("debug", &format!("发现设备 {} @ {}", p.name, p.addr));
-                        st.upsert_peer(PeerInfo {
-                            addr: p.addr.clone(),
-                            name: p.name.clone(),
-                            fingerprint: p.fingerprint.clone(),
-                            last_seen: queue::now_secs(),
+                thread::spawn(move || discover::announce_forever(ann, Duration::from_secs(5)));
+                thread::spawn(move || {
+                    // 每个来源 IP 2 秒内最多回执一次，只用来吸收重复广播
+                    let mut replied: std::collections::HashMap<String, std::time::Instant> =
+                        std::collections::HashMap::new();
+                    loop {
+                        // v0.13.1：收到即写进设备列表。旧实现要等 30 秒窗口结束才批量更新，
+                        // 管理页打开时常常是空的，看起来像「发现不到设备」。
+                        let r = discover::listen_each(Duration::from_secs(30), &self_fp, |p, from| {
+                            // 只记设备名与地址；指纹属设备唯一标识，按规范 #14 不落原文
+                            st.log("debug", &format!("发现设备 {} @ {}", p.name, p.addr));
+                            st.upsert_peer(PeerInfo {
+                                addr: p.addr.clone(),
+                                name: p.name.clone(),
+                                fingerprint: p.fingerprint.clone(),
+                                last_seen: queue::now_secs(),
+                            });
+                            // v0.13.3：单播回执。广播能到我，说明这一跳可达；
+                            // 我的广播未必能到它（多网卡/VPN 时只从默认路由出去）。
+                            // 只对「广播」回执，对「回执」不再回，避免两台设备互相乒乓。
+                            if p.reply {
+                                return;
+                            }
+                            let key = from.ip().to_string();
+                            let now = std::time::Instant::now();
+                            let due = replied
+                                .get(&key)
+                                .map(|t| now.duration_since(*t).as_secs() >= 2)
+                                .unwrap_or(true);
+                            if due {
+                                replied.insert(key, now);
+                                discover::reply_to(from, &ann_reply);
+                            }
                         });
-                    });
-                    if let Err(e) = r {
-                        // 端口被占用这类错误会立即返回；不睡就变成每秒上万条 warn 的死循环。
-                        // 2026-11-13 实测：同端口再起一个实例时，3 秒写出 1700+ 份轮转日志。
-                        st.log("warn", &format!("发现监听失败: {e}"));
-                        thread::sleep(Duration::from_secs(5));
+                        if let Err(e) = r {
+                            // 端口被占用这类错误会立即返回；不睡就变成每秒上万条 warn 的死循环。
+                            // 2026-11-13 实测：同端口再起一个实例时，3 秒写出 1700+ 份轮转日志。
+                            st.log("warn", &format!("发现监听失败: {e}"));
+                            thread::sleep(Duration::from_secs(5));
+                        }
                     }
                 });
             }

@@ -63,6 +63,9 @@ pub struct Config {
     pub queue_dir: PathBuf,
     /// 剪贴板中继监听地址（v0.6）。空串=不启动：剪贴板里可能有密码，默认关闭。
     pub clip_listen: String,
+    /// 管理页「浏览…」的根目录白名单（v0.13.3）。非空时只列这些目录，且只能在其中浏览；
+    /// 空 = 按旧行为列盘符（Windows）或 `/`。NAS 上配好后管理页就不会翻到系统目录。
+    pub browse_roots: Vec<PathBuf>,
 }
 
 impl Default for Config {
@@ -89,6 +92,8 @@ impl Default for Config {
             log_max_bytes: 4 * 1024 * 1024,
             queue_dir: base.join("queue"),
             clip_listen: String::new(),
+            // 缺省不限制：Windows 直接列盘符，与旧行为一致；NAS 建议显式配置
+            browse_roots: Vec::new(),
         }
     }
 }

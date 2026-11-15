@@ -264,7 +264,8 @@ function browse(p){
     var el=document.getElementById('browseList')
     var ds=j.dirs||[]
     el.innerHTML=ds.length?ds.map(function(d){
-      var name=d.replace(/[\\/]+$/,'').split(/[\\/]/).pop()||d
+      // 后端给了显示名就用它（盘符会带卷标，如「D: 仓库」），否则退回路径最后一段
+      var name=(j.labels&&j.labels[d])?j.labels[d]:(d.replace(/[\\/]+$/,'').split(/[\\/]/).pop()||d)
       return '<div style="margin:4px 0"><button data-dir="'+esc(d)+'" style="background:var(--accent-soft);color:var(--ink)">'+esc(name)+'</button></div>'
     }).join(''):'<p class="empty">没有子目录</p>'
   }).catch(function(){fill('browsePath','读取失败');fill('sendMsg','目录读取失败，可直接在输入框手输路径')})
@@ -493,27 +494,56 @@ fn url_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// 目录浏览：给管理页的「浏览…」用。空路径列出根（Windows 盘符 / Unix `/`）。
+/// 目录浏览：给管理页的「浏览…」用。空路径列根：
+/// - 配了 browse_roots 就只列这些目录（NAS 上不该让管理页翻到系统目录）；
+/// - 没配时 Windows 列盘符（带卷标名），其它平台列 `/`。
 /// 只列目录不列文件：发送单个文件时直接手输路径，避免列表被成千上万个文件刷屏。
-fn list_dirs(path: &str) -> io::Result<serde_json::Value> {
+fn list_dirs(path: &str, roots: &[PathBuf]) -> io::Result<serde_json::Value> {
     let mut dirs: Vec<String> = Vec::new();
+    // 路径 → 显示名。前端优先用它，盘符也能显示成「D: 仓库」
+    let mut labels: HashMap<String, String> = HashMap::new();
     let (cur, parent) = if path.trim().is_empty() {
-        #[cfg(windows)]
-        {
-            for letter in b'A'..=b'Z' {
-                let p = format!("{}:\\", letter as char);
-                if Path::new(&p).is_dir() {
+        if !roots.is_empty() {
+            for r in roots {
+                if r.is_dir() {
+                    let p = r.display().to_string();
+                    if let Some(n) = r.file_name() {
+                        labels.insert(p.clone(), n.to_string_lossy().to_string());
+                    }
                     dirs.push(p);
                 }
             }
-        }
-        #[cfg(not(windows))]
-        {
-            dirs.push("/".into());
+        } else {
+            #[cfg(windows)]
+            {
+                for letter in b'A'..=b'Z' {
+                    let p = format!("{}:\\", letter as char);
+                    if Path::new(&p).is_dir() {
+                        // v0.13.3：盘符后带卷标名，用户不必逐个点开才知道是哪块盘
+                        if let Some(label) = volume_label(&p) {
+                            if !label.trim().is_empty() {
+                                labels.insert(p.clone(), format!("{} {}", &p[..2], label.trim()));
+                            }
+                        }
+                        dirs.push(p);
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                dirs.push("/".into());
+            }
         }
         (String::new(), None)
     } else {
         let base = PathBuf::from(path);
+        // 配了浏览根就限制在这一层内，避免管理页被当成任意文件系统浏览器
+        if !roots.is_empty() && !within_roots(&base, roots) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "只能浏览配置里 browse_roots 列出的目录",
+            ));
+        }
         let parent = base.parent().map(|p| p.display().to_string());
         for entry in fs::read_dir(&base)? {
             let entry = entry?;
@@ -527,7 +557,60 @@ fn list_dirs(path: &str) -> io::Result<serde_json::Value> {
     dirs.sort_by_key(|a| a.to_lowercase());
     // 上限只是防止一次返回几万条把页面卡死；正常目录远达不到
     dirs.truncate(500);
-    Ok(serde_json::json!({ "path": cur, "parent": parent, "dirs": dirs }))
+    Ok(serde_json::json!({ "path": cur, "parent": parent, "dirs": dirs, "labels": labels }))
+}
+
+/// 判断 path 是否落在任意一个浏览根内。规范化后再比，避免 `..` 跳出白名单。
+fn within_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    roots.iter().any(|r| {
+        let r = r.canonicalize().unwrap_or_else(|_| r.clone());
+        p == r || p.starts_with(&r)
+    })
+}
+
+/// 取 Windows 盘符的卷标名；取不到（未格式化、无权限）就返回 None，不影响目录列表。
+#[cfg(windows)]
+fn volume_label(root: &str) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetVolumeInformationW(
+            root: *const u16,
+            name: *mut u16,
+            name_len: u32,
+            serial: *mut u32,
+            max_component: *mut u32,
+            flags: *mut u32,
+            fs_name: *mut u16,
+            fs_name_len: u32,
+        ) -> i32;
+    }
+    let wide: Vec<u16> = std::ffi::OsStr::new(root)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut buf = [0u16; 128];
+    let ok = unsafe {
+        GetVolumeInformationW(
+            wide.as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    if end == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buf[..end]))
 }
 
 pub fn serve(
@@ -701,7 +784,14 @@ fn route(
         // 目录浏览：管理页「浏览…」用，只列目录
         ("GET", "/api/fs") => {
             let want = query_value(query, "path");
-            match list_dirs(&want) {
+            // 浏览根是配置项，每次请求读一次：改配置重启后立即生效，不必缓存
+            let roots = state
+                .config
+                .lock()
+                .expect("config poisoned")
+                .browse_roots
+                .clone();
+            match list_dirs(&want, &roots) {
                 Ok(v) => json(&v),
                 Err(e) => json(&serde_json::json!({ "error": e.to_string() })),
             }
