@@ -84,6 +84,10 @@ pub struct PartFile {
     /// 句柄能否按路径重新打开：`open()` 可以；Android 的 `from_file` 只有 fd，关掉就没了，
     /// 所以那条路径保持常驻（`close_handles` 对它是空操作）。
     reopen_safe: bool,
+    /// v0.18：清单里每块的哈希。新写入的块在写之前先比对，比对通过就记为「已验」，
+    /// 收尾时不再整份重读；只有续传继承下来的块才需要回读校验。
+    block_hashes: Vec<String>,
+    verified_on_write: HashSet<u32>,
 }
 
 impl PartFile {
@@ -194,6 +198,8 @@ impl PartFile {
             map_file: Some(map_file),
             // 默认按「句柄不可重开」处理，由 open() 显式打开这个能力
             reopen_safe: false,
+            block_hashes: entry.block_hashes.clone(),
+            verified_on_write: HashSet::new(),
         })
     }
 
@@ -268,6 +274,17 @@ impl PartFile {
                 ),
             ));
         }
+        // v0.18：清单带了每块哈希时，写之前先比对。对不上就拒收这一块，
+        // 不让坏数据落盘；对上则记入「已验」，收尾不用再整份重读。
+        if let Some(want) = self.block_hashes.get(idx as usize) {
+            if !crate::hash::hash_bytes(data).eq_ignore_ascii_case(want) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("block {idx} hash mismatch"),
+                ));
+            }
+            self.verified_on_write.insert(idx);
+        }
         {
             let file = self.ensure_file()?;
             file.seek(SeekFrom::Start(idx as u64 * BLOCK_SIZE as u64))?;
@@ -294,12 +311,46 @@ impl PartFile {
 
     /// 块哈希 + 整文件根哈希双重校验；不靠肉眼看文件大小。
     /// 必须复用已经打开的句柄回读：SAF 只有 fd，没有可以再 open 一次的路径。
+    /// v0.18 Merkle 分段校验：清单每块哈希齐全时，只回读「不是本次写入」的块。
+    /// 本次写入的块已在落盘前逐块比对过，不再整份重读；续传继承下来的块必须回读，
+    /// 因为磁盘上的旧数据不在本次控制范围内。
+    /// 清单没有块哈希（极老发送端）时退回整文件 root 校验，保证仍能互通。
     pub fn verify(&mut self, entry: &FileEntry) -> io::Result<()> {
         if !self.complete() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "not all blocks received",
             ));
+        }
+        if !self.block_hashes.is_empty() {
+            if self.block_hashes.len() as u32 != self.total_blocks {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "block count mismatch",
+                ));
+            }
+            let mut pending: Vec<u32> = self
+                .received
+                .iter()
+                .copied()
+                .filter(|i| !self.verified_on_write.contains(i))
+                .collect();
+            pending.sort_unstable();
+            for idx in pending {
+                let want_len = expected_len(idx, self.total_blocks, self.file_size);
+                let mut buf = vec![0u8; want_len];
+                let file = self.ensure_file()?;
+                file.seek(SeekFrom::Start(idx as u64 * BLOCK_SIZE as u64))?;
+                file.read_exact(&mut buf)?;
+                let want = self.block_hashes[idx as usize].clone();
+                if !crate::hash::hash_bytes(&buf).eq_ignore_ascii_case(&want) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("block {idx} hash mismatch"),
+                    ));
+                }
+            }
+            return Ok(());
         }
         let file = self.ensure_file()?;
         file.seek(SeekFrom::Start(0))?;
@@ -459,6 +510,42 @@ pub fn read_map_text(path: &Path) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v0.18：写之前逐块比对，坏块直接拒收，不会落盘。
+    #[test]
+    fn merkle_rejects_wrong_block_before_write() {
+        let dir = std::env::temp_dir().join(format!("tc-store-merkle-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("a.bin.tcpart");
+        let entry = sample_entry(16);
+        let mut p = PartFile::open(&dest, &entry).unwrap();
+        let err = p.write_block(0, &[9u8; 16]).unwrap_err();
+        assert!(err.to_string().contains("hash mismatch"));
+        assert!(!p.has(0), "拒收的块不能记成已收");
+    }
+
+    /// v0.18：续传继承下来的块必须回读校验；本次写入的块不重复读。
+    #[test]
+    fn merkle_checks_inherited_blocks_only() {
+        let dir = std::env::temp_dir().join(format!("tc-store-merkle2-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("a.bin.tcpart");
+        let size = BLOCK_SIZE as u64 + 10;
+        let entry = sample_entry(size);
+        {
+            let mut p = PartFile::open(&dest, &entry).unwrap();
+            p.write_block(0, &vec![7u8; BLOCK_SIZE]).unwrap();
+        }
+        // 模拟上次落盘的数据已经坏了：继承块不能盲信
+        let mut data = fs::read(&dest).unwrap();
+        data[..8].fill(0xff);
+        fs::write(&dest, &data).unwrap();
+
+        let mut p = PartFile::open(&dest, &entry).unwrap();
+        p.write_block(1, &[7u8; 10]).unwrap();
+        let err = p.verify(&entry).unwrap_err();
+        assert!(err.to_string().contains("block 0"), "应指出坏的是继承块");
+    }
 
     fn sample_entry(size: u64) -> FileEntry {
         sample_entry_with(7u8, size)

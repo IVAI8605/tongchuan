@@ -624,24 +624,65 @@ fn plan_layout(
 /// 任何一步读失败都当成「没收到过」，退回普通传输——检查本身出错绝不能导致少传文件。
 /// 同名但内容不同的文件仍按原规则另起名字，不覆盖。
 fn already_present(final_paths: &[PathBuf], files: &[crate::manifest::FileEntry]) -> Vec<usize> {
-    let mut out = Vec::new();
-    for (i, f) in files.iter().enumerate() {
-        // plan_layout 对每个文件都给了一条最终路径，两者长度一致
-        let Some(path) = final_paths.get(i) else {
-            continue;
-        };
-        match fs::metadata(path) {
-            Ok(meta) if meta.is_file() && meta.len() == f.size => {
-                if crate::hash::hash_file(path)
-                    .map(|(root, _)| root == f.blake3)
-                    .unwrap_or(false)
-                {
-                    out.push(i);
-                }
-            }
-            _ => {}
+    // v0.18：按父目录分组，每个目录只 read_dir 一次，用文件名+大小建表；
+    // 之前每个文件一次 metadata，10000 个小文件就是 10000 次往返。
+    // SAF 的伪路径 read_dir 会失败，那一组退回逐文件判断，行为与旧版一致。
+    use std::collections::HashMap;
+    let mut groups: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+    for i in 0..files.len() {
+        if let Some(path) = final_paths.get(i) {
+            let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+            groups.entry(parent).or_default().push(i);
         }
     }
+    let mut out = Vec::new();
+    for (parent, indexes) in groups {
+        match fs::read_dir(&parent) {
+            Ok(rd) => {
+                let mut sizes: HashMap<std::ffi::OsString, u64> = HashMap::new();
+                for entry in rd.flatten() {
+                    if let Ok(meta) = entry.metadata() {
+                        if meta.is_file() {
+                            sizes.insert(entry.file_name(), meta.len());
+                        }
+                    }
+                }
+                for i in indexes {
+                    let path = &final_paths[i];
+                    let f = &files[i];
+                    let name = match path.file_name() {
+                        Some(n) => n,
+                        None => continue,
+                    };
+                    if sizes.get(name) == Some(&f.size)
+                        && crate::hash::hash_file(path)
+                            .map(|(root, _)| root == f.blake3)
+                            .unwrap_or(false)
+                    {
+                        out.push(i);
+                    }
+                }
+            }
+            Err(_) => {
+                // 退回逐文件 metadata：慢，但保证 SAF 与特殊挂载点仍能用
+                for i in indexes {
+                    let path = &final_paths[i];
+                    let f = &files[i];
+                    if let Ok(meta) = fs::metadata(path) {
+                        if meta.is_file()
+                            && meta.len() == f.size
+                            && crate::hash::hash_file(path)
+                                .map(|(root, _)| root == f.blake3)
+                                .unwrap_or(false)
+                        {
+                            out.push(i);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.sort_unstable();
     out
 }
 
