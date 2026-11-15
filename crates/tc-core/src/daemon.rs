@@ -160,6 +160,20 @@ impl Config {
         if self.allow.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "allow list is empty"));
         }
+        // 明显写错的数值在启动时就拦下，给一句能照着改的话，
+        // 而不是让 daemon 带着 max_sessions=0（所有接入都判忙）跑起来让人摸不着头脑。
+        if self.max_sessions == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "max_sessions 必须 ≥ 1（0 会让所有接入都被判忙）",
+            ));
+        }
+        if self.streams == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "streams 必须 ≥ 1（1 表示关闭多流）",
+            ));
+        }
         let dest = normalize(&self.destination);
         let allowed = self.allow.iter().any(|a| {
             let a = normalize(a);
@@ -583,6 +597,20 @@ mod tests {
         c.destination = PathBuf::from("D:/elsewhere");
         c.allow = vec![PathBuf::from("D:/allowed")];
         assert!(c.validate().is_err());
+    }
+
+    /// max_sessions / streams 写成 0 属于明显误配：启动即报错，别让它带着跑。
+    #[test]
+    fn zero_max_sessions_or_streams_is_rejected() {
+        let mut c = Config::default();
+        assert!(c.validate().is_ok(), "默认配置应通过校验");
+
+        c.max_sessions = 0;
+        assert_eq!(c.validate().unwrap_err().kind(), io::ErrorKind::InvalidInput);
+
+        let mut c = Config::default();
+        c.streams = 0;
+        assert_eq!(c.validate().unwrap_err().kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
