@@ -41,11 +41,19 @@ public final class TcNative {
      * pathsJson 是 JSON 字符串数组（必须是目录），pairCode 可为空，
      * deviceName 传 Build.MODEL（Android 取不到 HOSTNAME，不传对端会显示 unknown）。
      * force=true 表示强制重传（v0.12）：忽略对端已有文件，同名旧文件由对端改名让位。
+     * destId 为空表示用对端默认落点（v0.16）；否则必须是 listDestinations 返回过的标识。
      * 返回 {"ok","txnId","files","bytes","verdict","selfFp"} 或 {"ok":false,"reason","selfFp"}。
      */
     public static native String sendJson(String target, String peerFp, String pathsJson,
                                          String pairCode, String identityDir, String deviceName,
-                                         boolean force);
+                                         boolean force, String destId);
+
+    /**
+     * 查对端可用落点（v0.16）：{"ok":true,"destinations":[{"id","name"}]} 或 {"ok":false,"reason"}。
+     * 与发送走同一套 TLS 握手，因此对端同样会做信任判定。
+     */
+    public static native String listDestinations(String target, String peerFp, String pairCode,
+                                                 String identityDir, String deviceName);
 
     /**
      * 当前发送进度：{"active","percent","bytesSent","totalBytes","blocksSent","totalBlocks","files","current"}。

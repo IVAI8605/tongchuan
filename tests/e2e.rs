@@ -549,7 +549,10 @@ fn force_resend_retransmits_and_moves_old_file_aside() {
         &PlainOpener { addr: addr2 },
         &[album],
         None,
-        SendOptions { force: true },
+        SendOptions {
+            force: true,
+            dest_id: None,
+        },
     )
     .unwrap();
     let r2 = h2.join().unwrap();

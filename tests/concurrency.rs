@@ -249,7 +249,7 @@ fn duplicate_destination_is_rejected_then_reusable() {
     // A 单方面占住 dest/same/x.txt：发完清单拿到 MANIFEST_ACK，但一直不给数据连接
     let mut a = raw_session(&addr, "txn-claim");
     let manifest = build_manifest(&[a_dir.clone()], local_device()).unwrap();
-    write_message(&mut a, &Control::Manifest { manifest, force: false }).unwrap();
+    write_message(&mut a, &Control::Manifest { manifest, force: false, dest_id: None }).unwrap();
     assert!(matches!(
         read_message::<_, Control>(&mut a).unwrap(),
         Control::ManifestAck { .. }
@@ -364,7 +364,7 @@ fn single_session_rejects_second_device_explicitly() {
 
     let mut first = raw_session(&addr, "txn-first");
     let manifest = build_manifest(&[src], local_device()).unwrap();
-    write_message(&mut first, &Control::Manifest { manifest, force: false }).unwrap();
+    write_message(&mut first, &Control::Manifest { manifest, force: false, dest_id: None }).unwrap();
     assert!(matches!(
         read_message::<_, Control>(&mut first).unwrap(),
         Control::ManifestAck { .. }

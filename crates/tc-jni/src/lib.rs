@@ -188,6 +188,10 @@ pub fn start_receiver_with(config_json: &str, notifier: Option<Notifier>) -> Res
                 1,
             ) {
                 Ok(r) => {
+                    // v0.16：只查落点的会话不是接收，不计数也不弹通知
+                    if r.query_only {
+                        continue;
+                    }
                     rt2.sessions.fetch_add(1, Ordering::Relaxed);
                     rt2.bytes.fetch_add(r.bytes, Ordering::Relaxed);
                     // 只在会话真正结束（含中断）时通知一次，不按块通知，避免大文件刷屏刷声。
@@ -324,6 +328,7 @@ pub fn send_json(
     identity_dir: &str,
     device_name: &str,
     force: bool,
+    dest_id: &str,
 ) -> String {
     let raw: Vec<String> = match serde_json::from_str(paths_json) {
         Ok(v) => v,
@@ -396,7 +401,15 @@ pub fn send_json(
         dev,
         Some(&mut on_progress),
         Some(control.as_ref()),
-        tc_core::SendOptions { force },
+        // v0.16：dest_id 为空表示用接收端默认落点
+        tc_core::SendOptions {
+            force,
+            dest_id: if dest_id.trim().is_empty() {
+                None
+            } else {
+                Some(dest_id.trim().to_string())
+            },
+        },
     );
     SEND_ACTIVE.store(false, Ordering::Relaxed);
 
@@ -419,6 +432,52 @@ pub fn send_json(
             let self_fp = identity.fingerprint_hex();
             json!({ "ok": false, "reason": e.to_string(), "selfFp": self_fp }).to_string()
         }
+    }
+}
+
+/// v0.16：查对端有哪些可用落点。失败回 {"ok":false,"reason":...}。
+/// 查询复用正式发送的 TLS 握手，因此同样要过对端的信任门禁。
+pub fn list_destinations_json(
+    target: &str,
+    peer_fp: &str,
+    pair_code: &str,
+    identity_dir: &str,
+    device_name: &str,
+) -> String {
+    let identity = match Identity::load_or_create(std::path::Path::new(identity_dir)) {
+        Ok(i) => i,
+        Err(e) => return err_json(format!("本机身份加载失败: {e}")),
+    };
+    let expected = match Identity::parse_fingerprint(peer_fp) {
+        Ok(f) => f,
+        Err(e) => return err_json(format!("对端指纹非法: {e}")),
+    };
+    let config = match client_config_with_identity(expected, &identity) {
+        Ok(c) => c,
+        Err(e) => return err_json(format!("TLS 配置失败: {e}")),
+    };
+    let opener = TlsOpener {
+        addr: target.into(),
+        config,
+    };
+    let code = if pair_code.trim().is_empty() {
+        None
+    } else {
+        Some(pair_code.trim())
+    };
+    let mut dev = local_device();
+    if !device_name.trim().is_empty() {
+        dev.name = device_name.trim().to_string();
+    }
+    match tc_core::list_destinations(&opener, code, dev) {
+        Ok(list) => {
+            let items: Vec<_> = list
+                .iter()
+                .map(|d| json!({ "id": d.id, "name": d.name }))
+                .collect();
+            json!({ "ok": true, "destinations": items }).to_string()
+        }
+        Err(e) => err_json(e.to_string()),
     }
 }
 
@@ -699,6 +758,7 @@ pub extern "system" fn Java_com_tongchuan_TcNative_sendJson<'local>(
     identity_dir: JString<'local>,
     device_name: JString<'local>,
     force: jboolean,
+    dest_id: JString<'local>,
 ) -> jstring {
     let grab = |env: &mut JNIEnv<'local>, s: &JString<'local>| -> Option<String> {
         env.get_string(s).ok().map(Into::into)
@@ -709,6 +769,7 @@ pub extern "system" fn Java_com_tongchuan_TcNative_sendJson<'local>(
     let pair_code = grab(&mut env, &pair_code);
     let identity_dir = grab(&mut env, &identity_dir);
     let device_name = grab(&mut env, &device_name);
+    let dest_id_str = grab(&mut env, &dest_id).unwrap_or_default();
     let (Some(target), Some(peer_fp), Some(paths), Some(code), Some(dir), Some(name)) =
         (target, peer_fp, paths_json, pair_code, identity_dir, device_name)
     else {
@@ -722,7 +783,39 @@ pub extern "system" fn Java_com_tongchuan_TcNative_sendJson<'local>(
         &dir,
         &name,
         force != 0,
+        &dest_id_str,
     )) {
+        Ok(v) => v.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// v0.16：查对端可用落点，返回 JSON。参数与 sendJson 的前半段一致。
+#[no_mangle]
+pub extern "system" fn Java_com_tongchuan_TcNative_listDestinations<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    target: JString<'local>,
+    peer_fp: JString<'local>,
+    pair_code: JString<'local>,
+    identity_dir: JString<'local>,
+    device_name: JString<'local>,
+) -> jstring {
+    let grab = |env: &mut JNIEnv<'local>, s: &JString<'local>| -> Option<String> {
+        env.get_string(s).ok().map(Into::into)
+    };
+    let target = grab(&mut env, &target);
+    let peer_fp = grab(&mut env, &peer_fp);
+    let pair_code = grab(&mut env, &pair_code);
+    let identity_dir = grab(&mut env, &identity_dir);
+    let device_name = grab(&mut env, &device_name);
+    let (Some(target), Some(peer_fp), Some(code), Some(dir)) =
+        (target, peer_fp, pair_code, identity_dir)
+    else {
+        return std::ptr::null_mut();
+    };
+    let name = device_name.unwrap_or_default();
+    match env.new_string(list_destinations_json(&target, &peer_fp, &code, &dir, &name)) {
         Ok(v) => v.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }

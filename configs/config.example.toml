@@ -40,3 +40,15 @@ trust_mode = "closed"
 # Wi-Fi 上单流常吃不满链路，4 条收益明显；有线千兆以上按实测调小。
 # 只有两端都支持（0.15 及以上）才会真正开多流，旧端仍按单流传。
 streams = 4
+
+# 可被发送方选择的接收位置（v0.16）。手机发送前能查到这些名字并指定一个。
+# 每个 path 必须落在 allow 白名单内，否则守护进程拒绝启动；id 唯一、非空。
+# 不配这一段时只公布默认落点（destination），旧行为不变。
+# [[destinations]]
+# id = "download"
+# name = "SSD-下载"
+# path = "D:/通传/收到"
+# [[destinations]]
+# id = "h3t"
+# name = "好3T-收件"
+# path = "D:/通传/给好3T"

@@ -19,6 +19,9 @@ pub struct QueuedTask {
     pub fingerprint: Option<String>,
     pub identity_dir: Option<PathBuf>,
     pub pair_code: Option<String>,
+    /// v0.16：入队时选的接收落点；旧队列文件没有这个键，按默认落点补发
+    #[serde(default)]
+    pub dest_id: Option<String>,
 }
 
 pub fn now_secs() -> i64 {
@@ -91,6 +94,7 @@ mod tests {
             fingerprint: None,
             identity_dir: None,
             pair_code: None,
+            dest_id: None,
         }
     }
 

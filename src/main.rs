@@ -303,11 +303,16 @@ fn send_attempt(
     history_dir: &Path,
     retry_of: Option<&str>,
     force: bool,
+    dest_id: Option<&str>,
 ) -> (io::Result<tc_core::SendReport>, String) {
     let id = history::new_id();
     // 连握手阶段的错误也要落历史，所以把「建连接」和「跑会话」一起纳入同一条记录路径。
     // v0.12：force 只在发送端带标记，接收端据此不做增量跳过、并让同名旧文件改名让位。
-    let options = tc_core::SendOptions { force };
+    // v0.16：dest_id 是接收端公布的落点标识，空表示用它的默认落点。
+    let options = tc_core::SendOptions {
+        force,
+        dest_id: dest_id.map(str::to_string),
+    };
     let result = make_opener(to, peer_fp, identity)
         .and_then(|opener| tc_core::run_sender_with_opts(opener.as_ref(), paths, pair_code, options));
     match &result {
@@ -351,6 +356,7 @@ fn send_and_record(
     history_dir: &Path,
     retry_of: Option<&str>,
     force: bool,
+    dest_id: Option<&str>,
 ) -> io::Result<tc_core::SendReport> {
     send_attempt(
         to,
@@ -361,6 +367,7 @@ fn send_and_record(
         history_dir,
         retry_of,
         force,
+        dest_id,
     )
     .0
 }
@@ -378,6 +385,7 @@ fn send_with_retry(
     retry: bool,
     retry_of: Option<&str>,
     force: bool,
+    dest_id: Option<&str>,
 ) -> io::Result<tc_core::SendReport> {
     let delays = if retry { tc_core::retry::delays() } else { Vec::new() };
     let mut chain = retry_of.map(str::to_string);
@@ -392,6 +400,7 @@ fn send_with_retry(
             history_dir,
             chain.as_deref(),
             force,
+            dest_id,
         );
         match result {
             Ok(r) => return Ok(r),
@@ -472,6 +481,7 @@ fn run(args: &[String]) -> io::Result<()> {
                 args.iter().any(|a| a == "--retry"),
                 None,
                 args.iter().any(|a| a == "--force"),
+                opt(args, "--dest-id").as_deref(),
             ) {
                 Ok(r) => print_send(&r),
                 Err(e) => {
@@ -492,6 +502,7 @@ fn run(args: &[String]) -> io::Result<()> {
                             // 记下本次用的身份目录：补发时要用同一张证书，否则接收端会当成另一台设备
                             identity_dir: ident.as_ref().map(|(d, _)| d.clone()),
                             pair_code,
+                            dest_id: opt(args, "--dest-id"),
                         };
                         let p = queue::save(Path::new(&q), &task)?;
                         println!("SEND QUEUED path={} reason={}", p.display(), e);
@@ -499,6 +510,31 @@ fn run(args: &[String]) -> io::Result<()> {
                         return Err(e);
                     }
                 }
+            }
+            Ok(())
+        }
+        "dests" => {
+            // v0.16：只查对端可选落点，不传文件。握手与正式发送一致，因此同样受信任门禁约束。
+            let to = value(args, "--to")?;
+            let peer_fp = match opt(args, "--peer-fp") {
+                Some(f) => Some(f),
+                None => discover_fp_for(&to).map(|(fp, _)| fp),
+            };
+            let pair_code = opt(args, "--pair-code");
+            let ident = if peer_fp.is_some() {
+                Some(send_identity(args)?)
+            } else {
+                None
+            };
+            let opener = make_opener(
+                &to,
+                peer_fp.as_deref(),
+                ident.as_ref().map(|(_, id)| id),
+            )?;
+            let list = tc_core::list_destinations_for(opener.as_ref(), pair_code.as_deref())?;
+            println!("DESTS count={}", list.len());
+            for d in list {
+                println!("DEST id={} name={}", d.id, d.name);
             }
             Ok(())
         }
@@ -605,6 +641,7 @@ fn run(args: &[String]) -> io::Result<()> {
                 args.iter().any(|a| a == "--retry"),
                 Some(&rec.id),
                 args.iter().any(|a| a == "--force"),
+                opt(args, "--dest-id").as_deref(),
             )?;
             print_send(&r);
             Ok(())
@@ -889,12 +926,27 @@ fn run(args: &[String]) -> io::Result<()> {
                 // 与 CLI / 管理页共用同一个 TrustStore 实例，撤销后下一场会话立即生效
                 .with_gate(gate)
                 // v0.15：并行流数来自配置，1 = 关闭
-                .with_streams(cfg.streams as u8),
+                .with_streams(cfg.streams as u8)
+                // v0.16：可被发送方选择的落点；空表示只公布默认落点
+                .with_destinations(
+                    cfg.destinations
+                        .iter()
+                        .map(|d| tc_core::Destination {
+                            id: d.id.clone(),
+                            name: d.name.clone(),
+                            path: d.path.clone(),
+                        })
+                        .collect(),
+                ),
             );
             let st = state.clone();
             let on_report: Arc<dyn Fn(HubReport) + Send + Sync> = Arc::new(move |report| {
                 match report.result {
                     Ok(r) => {
+                        // v0.16：只查落点的会话不是传输，不写历史也不刷日志
+                        if r.query_only {
+                            return;
+                        }
                         // 来源设备与落点一并落历史：事后要能回答「谁发来的、存哪了」
                         let dev = r.device.clone();
                         st.add_history(HistoryEntry {
@@ -1025,6 +1077,8 @@ fn run(args: &[String]) -> io::Result<()> {
                     None,
                     // 队列补发是「补上没发出去的」，不带强制重传：否则每次补发都另存一份
                     false,
+                    // 入队时选的落点要一起补发，否则补发会落到默认目录
+                    t.dest_id.as_deref(),
                 ) {
                     Ok(r) => {
                         queue::mark_done(&p)?;
@@ -1052,9 +1106,10 @@ fn run(args: &[String]) -> io::Result<()> {
             println!("usage:");
             println!("  tc version");
             println!("  tc identity --dir DIR");
-            println!("  tc send --to IP:PORT --dir PATH [--dir PATH...] [--peer-fp HEX] [--pair-code CODE] [--identity DIR] [--queue-dir DIR] [--history-dir DIR] [--retry] [--force]");
+            println!("  tc send --to IP:PORT --dir PATH [--dir PATH...] [--peer-fp HEX] [--pair-code CODE] [--identity DIR] [--queue-dir DIR] [--history-dir DIR] [--retry] [--force] [--dest-id ID]");
+            println!("  tc dests --to IP:PORT [--peer-fp HEX] [--pair-code CODE] [--identity DIR]");
             println!("  tc history [--dir DIR] [--limit N]");
-            println!("  tc resend [--id ID|last] [--history-dir DIR] [--pair-code CODE] [--identity DIR] [--retry] [--force]");
+            println!("  tc resend [--id ID|last] [--history-dir DIR] [--pair-code CODE] [--identity DIR] [--retry] [--force] [--dest-id ID]");
             println!("  tc diag [--config FILE] [--identity DIR] [--out DIR] [--log FILE] [--history-dir DIR]");
             println!("  tc recv --listen IP:PORT --dest PATH [--identity DIR] [--pair-code CODE] [--trust-mode closed|open] [--root-map r0=NAME] [--streams N] [--announce]");
             println!("  tc daemon --config FILE");

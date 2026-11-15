@@ -252,6 +252,7 @@ fn sender_reports_old_receiver_with_readable_reason() {
                 version: "0.0.1".into(),
                 block_size: 0,
                 caps: vec![],
+                destinations: vec![],
             },
         )
         .unwrap();

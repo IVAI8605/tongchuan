@@ -59,6 +59,14 @@ pub fn version_reject_from_receiver(receiver: &str) -> String {
     )
 }
 
+/// v0.16：接收端对外公布的可用落点。只给标识与人可读名字，绝不带真实路径——
+/// 发送方只能「选一个已有标识」，不能凭它拼出任意目录。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DestEntry {
+    pub id: String,
+    pub name: String,
+}
+
 /// v0.14：一次请求多块的帧负载。用 (fileId, blockIndex) 列表表达，
 /// 顺序即发送顺序；接收端按同样顺序逐帧核对 BlockData。
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,6 +90,62 @@ pub const DEFAULT_STREAMS: u8 = 4;
 
 /// 并行流上限：再多只增加线程与内存（每流 8 MiB 缓冲），链路先到瓶颈。
 const MAX_STREAMS: u8 = 8;
+
+/// v0.16：接收端配置里的一个可选落点。`path` 必须落在 `allow` 内，
+/// 校验在配置加载时做一次；会话期只按 `id` 查表，不接受发送方传任意路径。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Destination {
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// 对外的可用落点清单。配置里没配 destinations 时派生一条「default」，
+/// 旧配置零改动；名字取默认目录的最后一段，方便用户认。
+fn dest_list(destinations: &[Destination], default: &Path) -> Vec<DestEntry> {
+    if destinations.is_empty() {
+        let name = default
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "默认位置".to_string());
+        return vec![DestEntry {
+            id: "default".into(),
+            name,
+        }];
+    }
+    destinations
+        .iter()
+        .map(|d| DestEntry {
+            id: d.id.clone(),
+            name: d.name.clone(),
+        })
+        .collect()
+}
+
+/// 把发送端选的标识映射成真实目录。未知标识、空标识都拒绝并给出可用列表，
+/// 错误信息直接回给发送端，用户要能照着改。
+fn resolve_destination(
+    destinations: &[Destination],
+    id: Option<&str>,
+    default: &Path,
+) -> Result<PathBuf, String> {
+    match id {
+        None => Ok(default.to_path_buf()),
+        // 旧配置派生出来的唯一落点：发送端会看到 "default"，允许原样回传
+        Some("default") if destinations.is_empty() => Ok(default.to_path_buf()),
+        Some(id) => destinations
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.path.clone())
+            .ok_or_else(|| {
+                let ids: Vec<&str> = destinations.iter().map(|d| d.id.as_str()).collect();
+                format!(
+                    "unknown destination: {id}（可用：{}）",
+                    if ids.is_empty() { "无".to_string() } else { ids.join(", ") }
+                )
+            }),
+    }
+}
 
 /// 实际开几条数据连接：对端不支持、或本次块太少时退回单流。
 /// 模拟中断（max_blocks）必须单流，否则多发出的请求会让续传语义对不上。
@@ -266,6 +330,9 @@ pub enum Control {
         /// v0.14：服务端能力，与 HELLO 的 `caps` 取交集后才启用 pack。
         #[serde(default)]
         caps: Vec<String>,
+        /// v0.16：可选的接收落点清单。旧发送端忽略这个键，继续发默认落点。
+        #[serde(default)]
+        destinations: Vec<DestEntry>,
     },
     /// 数据连接的身份声明。发送端开第二条连接后立刻发它，接收端才能按 txnId 把连接对回会话。
     /// 没有这条时接收端只能按 accept 顺序猜，第二台设备接入就会把控制连接当成数据连接。
@@ -289,6 +356,16 @@ pub enum Control {
         /// 旧发送端没有这个键，serde 默认 false，行为与 v0.11 完全一致。
         #[serde(default)]
         force: bool,
+        /// v0.16：本次落点标识（取自 HELLO_ACK 的 destinations）。缺省 = 默认落点；
+        /// 旧接收端不认识这个键会忽略，仍落在默认位置。
+        #[serde(rename = "destId", default, skip_serializing_if = "Option::is_none")]
+        dest_id: Option<String>,
+    },
+    /// v0.16：只查可用落点，不传文件。放在 HELLO_ACK 之后，复用同一次握手与信任判定。
+    Dests,
+    DestsAck {
+        #[serde(default)]
+        destinations: Vec<DestEntry>,
     },
     ManifestAck {
         #[serde(rename = "acceptedRoots")]
@@ -357,6 +434,9 @@ pub struct ReceiverReport {
     pub resumed_blocks: u64,
     /// v0.15：本场会话实际使用的数据连接数，1 = 单流。
     pub streams_used: u8,
+    /// v0.16：这只是一次「查可用落点」的会话，没有传文件。
+    /// daemon 与 Android 据此跳过历史与计数，避免查询把「最近接收」刷满。
+    pub query_only: bool,
     pub verified: bool,
     pub interrupted: bool,
     /// 来源设备（HELLO 里带的）。历史记录要能看出「谁发来的」，不再只有一句 txnId。
@@ -721,14 +801,16 @@ pub fn run_sender_with_device_progress(
     run_sender_with_device_control(opener, paths, pair_code, device, progress, None)
 }
 
-/// 发送端可选的会话行为（v0.12）。目前只有一项，但单独一个结构体，
-/// 以后加限速、多连接之类不必再动所有发送入口的签名。
-#[derive(Debug, Clone, Copy, Default)]
+/// 发送端可选的会话行为（v0.12）。目前只有两项，但单独一个结构体，
+/// 以后加限速、断点策略之类不必再动所有发送入口的签名。
+#[derive(Debug, Clone, Default)]
 pub struct SendOptions {
     /// true = 忽略接收端已有的同名同内容文件，本次全部重传。
     /// 接收端会把目标位置上的同名旧文件改名为 `xxx (1).ext` 让位，
     /// 本次到达的文件保留源文件名（用户 2026-11-14 明确的口径）。
     pub force: bool,
+    /// v0.16：接收端公布的落点标识；None = 用接收端的默认落点（旧行为）。
+    pub dest_id: Option<String>,
 }
 
 /// 带「暂停 / 取消」的发送入口（v0.11）。控制位只在本机读，不进协议：
@@ -815,6 +897,7 @@ pub fn run_sender_with_device_control_opts(
         &Control::Manifest {
             manifest: manifest.clone(),
             force: options.force,
+            dest_id: options.dest_id.clone(),
         },
     )?;
     let (accepted_ids, streams): (HashSet<String>, u8) = match read_message::<_, Control>(&mut ctrl)? {
@@ -1114,6 +1197,62 @@ fn report_progress(
     }
 }
 
+/// v0.16：只查对端的可用落点，不传任何文件。握手与正式发送完全一致（含版本与信任判定），
+/// 查完发一条 DESTS 让接收端干净收尾，避免它把「没发清单」记成异常会话。
+pub fn list_destinations(
+    opener: &dyn Opener,
+    pair_code: Option<&str>,
+    device: DeviceInfo,
+) -> io::Result<Vec<DestEntry>> {
+    let mut ctrl = opener.open()?;
+    // 查询用独立 txn 前缀：并发时不会与真实传输的 txnId 撞车
+    let txn_id = format!("dests-{}-{}", std::process::id(), crate::queue::now_secs());
+    write_message(
+        &mut ctrl,
+        &Control::Hello {
+            txn_id,
+            device,
+            pair_code: pair_code.map(str::to_string),
+            version: PROTOCOL_VERSION.into(),
+            block_size: BLOCK_SIZE as u32,
+            caps: vec![CAP_PACK.to_string(), CAP_STREAMS.to_string()],
+        },
+    )?;
+    let from_ack = match read_message::<_, Control>(&mut ctrl)? {
+        Control::HelloAck {
+            version,
+            block_size,
+            destinations,
+            ..
+        } => {
+            if !protocol_compatible(&version) {
+                return Err(io_err(version_reject_from_receiver(&version)));
+            }
+            if block_size != BLOCK_SIZE as u32 {
+                return Err(io_err(block_size_reject_reason(block_size)));
+            }
+            destinations
+        }
+        Control::Busy { reason } => return Err(io_err(format!("receiver is busy: {reason}"))),
+        other => return Err(io_err(format!("unexpected hello reply: {other:?}"))),
+    };
+    write_message(&mut ctrl, &Control::Dests)?;
+    match read_message::<_, Control>(&mut ctrl)? {
+        Control::DestsAck { destinations } => Ok(destinations),
+        Control::Busy { reason } => Err(io_err(format!("receiver rejected query: {reason}"))),
+        // 0.16 之前的接收端不认识 DESTS：握手时已经给了清单，就用它
+        other => {
+            let _ = other;
+            Ok(from_ack)
+        }
+    }
+}
+
+/// 用本机设备名查询（CLI 与 Android 共用的便捷入口）。
+pub fn list_destinations_for(opener: &dyn Opener, pair_code: Option<&str>) -> io::Result<Vec<DestEntry>> {
+    list_destinations(opener, pair_code, local_device())
+}
+
 fn build_source_map(paths: &[PathBuf], m: &Manifest) -> io::Result<HashMap<String, PathBuf>> {
     let mut map = HashMap::new();
     // 根与入参不是一一对应（单个文件会按父目录归组），所以必须用同一套 plan_roots 规则还原基准目录
@@ -1309,6 +1448,8 @@ pub fn run_receiver_with_store_gate_streams(
         first,
         &mut data,
         dest,
+        // v0.16：单会话入口（CLI / Android 接收）不支持多落点，只公布默认项
+        &[],
         max_blocks,
         expected_pair_code,
         root_map,
@@ -1590,6 +1731,8 @@ fn handle_session(
     first: Control,
     data_conn: &mut dyn DataConn,
     dest: &Path,
+    // v0.16：可被发送方选择的落点（来自配置）。空 = 只有默认落点。
+    destinations: &[Destination],
     max_blocks: Option<usize>,
     expected_pair_code: Option<&str>,
     root_map: &HashMap<String, String>,
@@ -1676,14 +1819,56 @@ fn handle_session(
             version: PROTOCOL_VERSION.into(),
             block_size: BLOCK_SIZE as u32,
             caps: vec![CAP_PACK.to_string(), CAP_STREAMS.to_string()],
+            destinations: dest_list(destinations, dest),
         },
     )?;
 
-    let (manifest, force) = match read_message::<_, Control>(ctrl)? {
-        Control::Manifest { manifest, force } => (manifest, force),
+    let (manifest, force, dest_id) = match read_message::<_, Control>(ctrl)? {
+        Control::Manifest {
+            manifest,
+            force,
+            dest_id,
+        } => (manifest, force, dest_id),
+        // v0.16：只查落点。回完就结束，不写历史、不占会话计数（报告里标 query_only）
+        Control::Dests => {
+            write_message(
+                ctrl,
+                &Control::DestsAck {
+                    destinations: dest_list(destinations, dest),
+                },
+            )?;
+            return Ok(ReceiverReport {
+                txn_id,
+                files: 0,
+                bytes: 0,
+                blocks_written: 0,
+                resumed_blocks: 0,
+                streams_used: 0,
+                query_only: true,
+                verified: false,
+                interrupted: false,
+                device: Some(device),
+                roots: Vec::new(),
+                peer_addr: peer_addr.map(str::to_string),
+                wait_us: 0,
+                write_us: 0,
+                req_us: 0,
+                verify_us: 0,
+                skipped_files: 0,
+                skipped_bytes: 0,
+            });
+        }
         other => return Err(io_err(format!("expected MANIFEST, got {other:?}"))),
     };
-    let layout = plan_layout(dest, &manifest, root_map)?;
+    // v0.16：落点只在接收端配置里映射，未知标识在回 ACK 之前就拒绝
+    let dest = match resolve_destination(destinations, dest_id.as_deref(), dest) {
+        Ok(p) => p,
+        Err(reason) => {
+            write_message(ctrl, &Control::Busy { reason: reason.clone() })?;
+            return Err(io_err(reason));
+        }
+    };
+    let layout = plan_layout(&dest, &manifest, root_map)?;
 
     // 增量同步：目标位置上已经是同一份内容的文件不再请求数据块。
     // 必须在 ACK 之前算出来——发送端就是按 accepted_file_ids 决定「哪些文件不用回数据」。
@@ -1893,6 +2078,7 @@ fn handle_session(
         blocks_written,
         resumed_blocks,
         streams_used: streams,
+        query_only: false,
         verified: false,
         interrupted,
         device: Some(device),
@@ -2003,6 +2189,8 @@ pub struct ReceiverHub {
     data_wait_secs: u64,
     /// v0.15：本实例最多允许的并行流数（1 = 关闭）
     streams: u8,
+    /// v0.16：可被发送方选择的落点；空 = 只公布默认项
+    destinations: Vec<Destination>,
 }
 
 impl ReceiverHub {
@@ -2025,7 +2213,14 @@ impl ReceiverHub {
             gate: None,
             data_wait_secs: DATA_WAIT_SECS,
             streams: DEFAULT_STREAMS,
+            destinations: Vec::new(),
         }
+    }
+
+    /// v0.16：设置可被发送方选择的落点。必须在 `Arc::new` 之前调用。
+    pub fn with_destinations(mut self, destinations: Vec<Destination>) -> Self {
+        self.destinations = destinations;
+        self
     }
 
     /// 设置并行流数（1 = 关闭）。与 `with_gate` 一样，必须在 `Arc::new` 之前调用。
@@ -2169,6 +2364,7 @@ impl ReceiverHub {
             first,
             &mut data,
             &self.dest,
+            &self.destinations,
             None,
             self.expected_pair_code.as_deref(),
             &self.root_map,

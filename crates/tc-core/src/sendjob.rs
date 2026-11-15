@@ -137,7 +137,11 @@ fn run(state: Arc<DaemonState>, req: SendRequest, path: PathBuf, fingerprint: St
             crate::manifest::local_device(),
             Some(&mut progress),
             None,
-            crate::SendOptions { force: req.force },
+            // v0.16：管理页本版不提供落点选择，仍发默认落点
+            crate::SendOptions {
+                force: req.force,
+                dest_id: None,
+            },
         )
     })();
 

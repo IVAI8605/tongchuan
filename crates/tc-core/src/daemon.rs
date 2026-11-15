@@ -69,6 +69,17 @@ pub struct Config {
     /// 单会话的并行数据流数（v0.15）。1 = 关闭；上限 8。
     /// 只在链路单流吃不满时才有收益（典型是 Wi-Fi），有线千兆以上可以按实测调。
     pub streams: usize,
+    /// v0.16：可被发送方选择的落点。空 = 只公布默认落点（旧行为）。
+    /// 每个 path 都必须落在 allow 内，否则拒绝启动。
+    pub destinations: Vec<DestConfig>,
+}
+
+/// v0.16：配置里的一个可选落点。id 是发送方唯一能传的东西，name 只用于界面显示。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DestConfig {
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
 }
 
 impl Default for Config {
@@ -99,6 +110,8 @@ impl Default for Config {
             browse_roots: Vec::new(),
             // 4 条流：Wi-Fi 上单流通常吃不满链路，4 条实测收益明显；有线链路按需调小
             streams: 4,
+            // 默认不公布额外落点：旧配置与旧行为一致
+            destinations: Vec::new(),
         }
     }
 }
@@ -150,6 +163,35 @@ impl Config {
                 io::ErrorKind::PermissionDenied,
                 format!("destination {} is outside the allow list", self.destination.display()),
             ));
+        }
+        // v0.16：每个可选落点也必须在白名单内，id 不能为空或重复——
+        // 这些是目前发送方唯一能指定的东西，配错了会造成「选得到但写不进」。
+        let mut seen = std::collections::HashSet::new();
+        for d in &self.destinations {
+            let id = d.id.trim();
+            if id.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("destinations 里有空 id（path {}）", d.path.display()),
+                ));
+            }
+            if !seen.insert(id.to_string()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("destinations 里 id 重复：{id}"),
+                ));
+            }
+            let p = normalize(&d.path);
+            let ok = self.allow.iter().any(|a| {
+                let a = normalize(a);
+                p == a || p.starts_with(&a)
+            });
+            if !ok {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("destination {id} 的 path {} 不在 allow 内", d.path.display()),
+                ));
+            }
         }
         Ok(())
     }

@@ -43,7 +43,8 @@ public class SendService extends Service {
     }
 
     public static void start(Context ctx, String target, String fp, String pathsJson,
-                             String pairCode, String identityDir, String deviceName, boolean force) {
+                             String pairCode, String identityDir, String deviceName, boolean force,
+                             String destId) {
         Intent i = new Intent(ctx, SendService.class);
         i.putExtra("target", target);
         i.putExtra("fp", fp);
@@ -53,6 +54,8 @@ public class SendService extends Service {
         i.putExtra("device", deviceName);
         // v0.12：强制重传随 Intent 传给后台线程，界面与通知都不需要再读 UI 状态
         i.putExtra("force", force);
+        // v0.16：接收端落点标识，空串 = 默认落点
+        i.putExtra("destId", destId == null ? "" : destId);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             ctx.startForegroundService(i);
         } else {
@@ -92,6 +95,8 @@ public class SendService extends Service {
         final String identity = intent.getStringExtra("identity");
         final String device = intent.getStringExtra("device");
         final boolean force = intent.getBooleanExtra("force", false);
+        // v0.16：接收端落点标识；空串表示用对方默认落点
+        final String destId = intent.getStringExtra("destId");
 
         running = true;
         lastResult = null;
@@ -123,12 +128,12 @@ public class SendService extends Service {
             String out = null;
             try {
                 out = TcNative.sendJson(target, fp, paths, pair == null ? "" : pair,
-                        identity, device, force);
+                        identity, device, force, destId == null ? "" : destId);
                 // 网络类失败自动重试一次：多半是刚锁屏/刚切信道导致的瞬断，重试成本低
                 if (isRetryable(out)) {
                     Thread.sleep(RETRY_DELAY_MS);
                     out = TcNative.sendJson(target, fp, paths, pair == null ? "" : pair,
-                            identity, device, force);
+                            identity, device, force, destId == null ? "" : destId);
                 }
             } catch (Exception e) {
                 out = "{\"ok\":false,\"reason\":\"" + e.getMessage() + "\"}";

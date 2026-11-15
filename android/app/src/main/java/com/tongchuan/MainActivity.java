@@ -94,6 +94,10 @@ public class MainActivity extends Activity {
     private android.widget.EditText pairInput;
     /** v0.7：已选目标（addr / fp / name），支持一次选多台顺序发 */
     private final List<String[]> selectedPeers = new ArrayList<>();
+    /** v0.16：对端可用落点（id / name）；多目标时一律用各自默认，不提供选择 */
+    private final List<String[]> destOptions = new ArrayList<>();
+    private String destId = "";
+    private TextView destText;
     /** 最近一次发现结果：勾选/取消后据此重画列表，不必再发一轮广播 */
     private String lastPeersJson;
     /** v0.7：最近发送列表容器 */
@@ -265,6 +269,30 @@ public class MainActivity extends Activity {
         sendTarget.setOnClickListener(v -> openDevicePanelAndDiscover());
         targetRow.addView(sendTarget);
         root.addView(targetRow);
+
+        // v0.16：接收位置一行。选定目标后在后台查一次，默认就是对方的默认落点。
+        LinearLayout destRow = new LinearLayout(this);
+        destRow.setOrientation(LinearLayout.HORIZONTAL);
+        destRow.setGravity(Gravity.CENTER_VERTICAL);
+        destRow.setPadding(dp(14), 0, dp(14), dp(10));
+        TextView destLabel = new TextView(this);
+        destLabel.setText("接收位置");
+        destLabel.setTextSize(17);
+        destLabel.setTextColor(COLOR_MUTED);
+        destLabel.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.34f));
+        destRow.addView(destLabel);
+        destText = new TextView(this);
+        destText.setTextSize(14);
+        destText.setTextColor(COLOR_INK);
+        destText.setText("默认");
+        LinearLayout.LayoutParams destLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.66f);
+        destLp.setMargins(dp(10), 0, 0, 0);
+        destText.setLayoutParams(destLp);
+        destText.setOnClickListener(v -> chooseDestination());
+        destRow.addView(destText);
+        root.addView(destRow);
 
         LinearLayout sendCard = card();
 
@@ -528,6 +556,8 @@ public class MainActivity extends Activity {
         final String target = intent.getStringExtra("tc_target");
         final String fp = intent.getStringExtra("tc_fp");
         final String paths = intent.getStringExtra("tc_paths");
+        // v0.16：探针可指定落点标识，便于自动化验证「选第二个位置」的真实落盘
+        final String dest = intent.getStringExtra("tc_dest");
         final long timeoutMs = intent.getLongExtra("tc_timeout", 6000);
         final String identityDir = ReceiverService.identityDir(this).getAbsolutePath();
         // 发送会阻塞到会话结束，必须离开主线程，否则界面直接 ANR
@@ -564,6 +594,9 @@ public class MainActivity extends Activity {
                 out = runDiscover(timeoutMs);
             } else if ("progress".equals(cmd)) {
                 out = TcNative.sendProgress();
+            } else if ("dests".equals(cmd)) {
+                // v0.16：只查落点，不传文件；自动化用它确认手机能拿到 NAS 的清单
+                out = TcNative.listDestinations(target, fp, "", identityDir, Build.MODEL);
             } else if ("send".equals(cmd)) {
                 // 单个路径时用 JSONArray 现拼，避免在 adb 命令行里嵌套引号被 shell 吃掉
                 String pj = paths;
@@ -597,7 +630,7 @@ public class MainActivity extends Activity {
                 mon.start();
                 // 探针也走正式那条路（前台服务）：自动化验证才能覆盖锁屏与通知
                 SendService.start(MainActivity.this, target, fp, pj, "", identityDir, Build.MODEL,
-                        intent.getBooleanExtra("tc_force", false));
+                        intent.getBooleanExtra("tc_force", false), dest == null ? "" : dest);
                 long t0 = System.currentTimeMillis();
                 String r = null;
                 while (r == null) {
@@ -803,6 +836,7 @@ public class MainActivity extends Activity {
     }
 
     private void updateTargetLabel() {
+        refreshDestinations();
         if (selectedPeers.isEmpty()) {
             sendTarget.setText("尚未选择目标");
             return;
@@ -823,6 +857,90 @@ public class MainActivity extends Activity {
             names.append(t[2] == null || t[2].isEmpty() ? t[0] : t[2]);
         }
         sendTarget.setText("已选 " + selectedPeers.size() + " 个目标\n" + names);
+    }
+
+    /**
+     * v0.16：选中单个目标后查一次可用落点。查询失败不影响发送——退回默认落点，
+     * 用户仍能照常发；多目标时不提供选择，各用对方的默认位置。
+     */
+    private void refreshDestinations() {
+        destOptions.clear();
+        destId = "";
+        if (destText == null) {
+            return;
+        }
+        if (selectedPeers.size() != 1) {
+            destText.setText(selectedPeers.isEmpty() ? "默认" : "各自默认（多目标）");
+            return;
+        }
+        final String[] t = selectedPeers.get(0);
+        final String pair = pairInput == null ? "" : pairInput.getText().toString().trim();
+        final String identityDir = ReceiverService.identityDir(this).getAbsolutePath();
+        destText.setText("查询中…");
+        new Thread(() -> {
+            String out = TcNative.listDestinations(t[0], t[1], pair, identityDir, Build.MODEL);
+            runOnUiThread(() -> applyDestinations(t[0], out));
+        }, "tc-dests").start();
+    }
+
+    private void applyDestinations(String addr, String out) {
+        // 查询期间目标被换掉：结果作废，避免把 A 的落点用到 B 上
+        if (selectedPeers.size() != 1 || !selectedPeers.get(0)[0].equals(addr)) {
+            return;
+        }
+        destOptions.clear();
+        try {
+            JSONObject o = new JSONObject(out == null ? "{}" : out);
+            JSONArray arr = o.optJSONArray("destinations");
+            if (o.optBoolean("ok") && arr != null) {
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject d = arr.getJSONObject(i);
+                    String id = d.optString("id");
+                    if (id.isEmpty()) {
+                        continue;
+                    }
+                    destOptions.add(new String[]{id, d.optString("name", id)});
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        destText.setText(destOptions.isEmpty() ? "默认" : "默认（点选，共 " + destOptions.size() + " 个可选）");
+    }
+
+    private void chooseDestination() {
+        if (selectedPeers.size() != 1) {
+            android.widget.Toast.makeText(this, "多目标时各用对方的默认位置",
+                    android.widget.Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (destOptions.isEmpty()) {
+            // 可能是还没查、或对方只有默认位置：重查一次，查不到就说明没有别的可选
+            refreshDestinations();
+            return;
+        }
+        final List<String> labels = new ArrayList<>();
+        labels.add("默认位置");
+        int checked = 0;
+        for (int i = 0; i < destOptions.size(); i++) {
+            labels.add(destOptions.get(i)[1]);
+            if (destOptions.get(i)[0].equals(destId)) {
+                checked = i + 1;
+            }
+        }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("接收位置")
+                .setSingleChoiceItems(labels.toArray(new String[0]), checked, (d, which) -> {
+                    if (which == 0) {
+                        destId = "";
+                        destText.setText("默认");
+                    } else {
+                        destId = destOptions.get(which - 1)[0];
+                        destText.setText(labels.get(which));
+                    }
+                    d.dismiss();
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private boolean isPeerSelected(String addr) {
@@ -975,6 +1093,8 @@ public class MainActivity extends Activity {
         }
         // 快照：发送过程中用户继续勾选/取消，不该改变这一批的目标
         final List<String[]> targets = new ArrayList<>(selectedPeers);
+        // v0.16：落点也在开跑前定死，发送期间换目标不影响这一批
+        final String batchDest = selectedPeers.size() == 1 ? destId : "";
         final String pathsJson = arr.toString();
         // M4：配对码由用户现场填，core 早已支持 pair_code，之前手机侧没有入口
         final String pairCode = pairInput == null ? "" : pairInput.getText().toString().trim();
@@ -1093,8 +1213,9 @@ public class MainActivity extends Activity {
                         : "正在扫描并计算校验值…（文件多时需要一会儿）";
                 runOnUiThread(() -> sendProgressText.setText(progress));
 
+                // v0.16：落点只对单目标有意义；多目标时各用对方默认位置
                 SendService.start(MainActivity.this, t[0], t[1], pathsJson, pairCode, identityDir,
-                        Build.MODEL, force);
+                        Build.MODEL, force, batchDest);
                 String out = awaitSendResult();
                 Outcome oc = parseOutcome(t[0], t[2], out);
                 if (oc.ok) {

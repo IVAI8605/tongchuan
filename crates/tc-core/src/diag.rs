@@ -92,6 +92,22 @@ pub fn run(opts: &DiagOptions) -> io::Result<PathBuf> {
                 cfg.streams.max(1)
             ));
             report.push_str(&format!(
+                "可选接收位置：{} 个{}\n",
+                cfg.destinations.len(),
+                if cfg.destinations.is_empty() {
+                    "（只有默认落点）".to_string()
+                } else {
+                    format!(
+                        "（{}）",
+                        cfg.destinations
+                            .iter()
+                            .map(|d| d.name.clone())
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    )
+                }
+            ));
+            report.push_str(&format!(
                 "剪贴板中继：{}\n",
                 if cfg.clip_listen.trim().is_empty() {
                     "未启用".to_string()
