@@ -249,9 +249,13 @@ function loadTargets(){
   }).catch(function(){})
 }
 function browse(p){
+  var box=document.getElementById('browse')
+  // 面板在发送区下方，点完不滚过去用户会以为按钮没反应（v0.13.1 修）
+  box.style.display='block'
+  fill('browsePath','正在读取…')
+  try{box.scrollIntoView({block:'nearest'})}catch(e){}
   fetch('/api/fs?path='+encodeURIComponent(p||'')).then(function(r){return r.json()}).then(function(j){
-    if(j.error){fill('sendMsg','目录读取失败：'+j.error);return}
-    document.getElementById('browse').style.display='block'
+    if(j.error){fill('browsePath','读取失败');fill('sendMsg','目录读取失败：'+j.error+'（可直接在输入框手输路径）');return}
     browseCur=j.path||''
     // 上级路径直接用后端算好的 parent：前端自己截字符串会在「D:\」这类根路径上截错
     browseParent=j.parent||''
@@ -263,7 +267,7 @@ function browse(p){
       var name=d.replace(/[\\/]+$/,'').split(/[\\/]/).pop()||d
       return '<div style="margin:4px 0"><button data-dir="'+esc(d)+'" style="background:var(--accent-soft);color:var(--ink)">'+esc(name)+'</button></div>'
     }).join(''):'<p class="empty">没有子目录</p>'
-  }).catch(function(){fill('sendMsg','目录读取失败')})
+  }).catch(function(){fill('browsePath','读取失败');fill('sendMsg','目录读取失败，可直接在输入框手输路径')})
 }
 function startSend(addr,fp,path,force){
   lastSend={addr:addr,fp:fp,path:path,force:!!force}
@@ -292,7 +296,20 @@ function sendStatus(){
     retry.style.display=(j.phase==='failed'&&lastSend)?'inline-block':'none'
   }).catch(function(){})
 }
-document.getElementById('sendReload').addEventListener('click',loadTargets)
+document.getElementById('sendReload').addEventListener('click',function(){
+  var el=document.getElementById('sendTarget')
+  // 先给即时反馈：发现要等一个广播周期，没有提示会像按钮坏了（v0.13.1 修）
+  el.innerHTML='<option value="">正在发现设备（最多 6 秒）…</option>'
+  fill('sendMsg','正在监听局域网内的设备公告…')
+  fetch('/api/discover').then(function(r){return r.json()}).then(function(list){
+    if(!list||!list.length){
+      fill('sendMsg','未发现设备：确认对端已开启接收、与本品在同一局域网，且防火墙放行 UDP 53318')
+    }else{
+      fill('sendMsg','发现 '+list.length+' 台设备')
+    }
+    loadTargets()
+  }).catch(function(){fill('sendMsg','发现请求失败');loadTargets()})
+})
 document.getElementById('sendBrowse').addEventListener('click',function(){
   browse(document.getElementById('sendPath').value.trim())
 })
@@ -673,6 +690,14 @@ fn route(
             json(&s)
         }
         ("GET", "/api/history") => json(&state.recent_history()),
+        // 管理页「刷新设备」用：后台发现线程一直在听，这里等一个广播周期再返回最新列表。
+        // 不在这里自己 bind 端口——两个 socket 抢同一个 UDP 端口时包只会流向其中一个，
+        // 反而可能让常驻监听漏掉公告（v0.13.1 起改为等待后台线程收齐）。
+        ("GET", "/api/discover") => {
+            // 对端广播间隔是 5 秒，等 5.5 秒保证覆盖一整轮
+            thread::sleep(std::time::Duration::from_millis(5500));
+            json(&*state.peers.lock().expect("peers poisoned"))
+        }
         // 目录浏览：管理页「浏览…」用，只列目录
         ("GET", "/api/fs") => {
             let want = query_value(query, "path");

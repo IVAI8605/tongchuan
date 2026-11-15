@@ -743,25 +743,23 @@ fn run(args: &[String]) -> io::Result<()> {
                 let st = state.clone();
                 let self_fp = fp.clone();
                 thread::spawn(move || loop {
-                    match discover::listen(Duration::from_secs(30), &self_fp) {
-                        Ok(peers) => {
-                            for p in peers {
-                                // 只记设备名与地址；指纹属设备唯一标识，按规范 #14 不落原文
-                                st.log("debug", &format!("发现设备 {} @ {}", p.name, p.addr));
-                                st.upsert_peer(PeerInfo {
-                                    addr: p.addr,
-                                    name: p.name,
-                                    fingerprint: p.fingerprint,
-                                    last_seen: queue::now_secs(),
-                                });
-                            }
-                        }
+                    // v0.13.1：收到即写进设备列表。旧实现要等 30 秒窗口结束才批量更新，
+                    // 管理页打开时常常是空的，看起来像「发现不到设备」。
+                    let r = discover::listen_each(Duration::from_secs(30), &self_fp, |p| {
+                        // 只记设备名与地址；指纹属设备唯一标识，按规范 #14 不落原文
+                        st.log("debug", &format!("发现设备 {} @ {}", p.name, p.addr));
+                        st.upsert_peer(PeerInfo {
+                            addr: p.addr.clone(),
+                            name: p.name.clone(),
+                            fingerprint: p.fingerprint.clone(),
+                            last_seen: queue::now_secs(),
+                        });
+                    });
+                    if let Err(e) = r {
                         // 端口被占用这类错误会立即返回；不睡就变成每秒上万条 warn 的死循环。
                         // 2026-11-13 实测：同端口再起一个实例时，3 秒写出 1700+ 份轮转日志。
-                        Err(e) => {
-                            st.log("warn", &format!("发现监听失败: {e}"));
-                            thread::sleep(Duration::from_secs(5));
-                        }
+                        st.log("warn", &format!("发现监听失败: {e}"));
+                        thread::sleep(Duration::from_secs(5));
                     }
                 });
             }

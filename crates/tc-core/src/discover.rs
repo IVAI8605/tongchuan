@@ -244,12 +244,41 @@ fn bind_shared(port: u16) -> io::Result<UdpSocket> {
 
 /// 收公告直到超时；按「IP + 指纹」去重，并过滤掉自己发的包。
 pub fn listen(timeout: Duration, self_fingerprint: &str) -> io::Result<Vec<Peer>> {
-    listen_on(DISCOVERY_PORT, timeout, self_fingerprint)
+    let mut seen: HashMap<String, Peer> = HashMap::new();
+    // 复用同一套绑定与解码逻辑，避免两条路径对「什么算一台设备」判断不一致
+    listen_each(timeout, self_fingerprint, |p| {
+        seen.insert(p.addr.clone(), p.clone());
+    })?;
+    Ok(seen.into_values().collect())
 }
 
-/// 指定端口监听。正式路径固定 53318；测试用独立端口，避免受本机旧版守护进程影响
+/// 边收边回调：每收到一条有效公告就交给调用方处理，供守护进程即时更新设备列表。
+/// 常驻端不能用 listen 的「窗口结束才返回」——那样新设备最多要等一整轮窗口才出现在管理页。
+pub fn listen_each(
+    timeout: Duration,
+    self_fingerprint: &str,
+    mut on_peer: impl FnMut(&Peer),
+) -> io::Result<()> {
+    listen_on_each(DISCOVERY_PORT, timeout, self_fingerprint, &mut on_peer)
+}
+
+/// 指定端口监听，仅供测试：正式路径固定 53318，测试用独立端口避免受本机旧版守护进程影响
 /// （Windows 上旧监听没设 SO_REUSEADDR 时，后来者连「共享绑定」都会被拒）。
+#[cfg(test)]
 fn listen_on(port: u16, timeout: Duration, self_fingerprint: &str) -> io::Result<Vec<Peer>> {
+    let mut seen: HashMap<String, Peer> = HashMap::new();
+    listen_on_each(port, timeout, self_fingerprint, &mut |p: &Peer| {
+        seen.insert(p.addr.clone(), p.clone());
+    })?;
+    Ok(seen.into_values().collect())
+}
+
+fn listen_on_each(
+    port: u16,
+    timeout: Duration,
+    self_fingerprint: &str,
+    on_peer: &mut dyn FnMut(&Peer),
+) -> io::Result<()> {
     // v0.12：发现监听必须能和常驻进程共用一个端口。桌面守护进程一直在听 53318，
     // 命令行 `tc discover`、e2e 用例再听一次就会 AddrInUse（v0.11 之前跑门禁得先退托盘）。
     // 先按「端口可复用」绑，失败再退回普通绑定，行为至少不比旧版更差。
@@ -266,7 +295,6 @@ fn listen_on(port: u16, timeout: Duration, self_fingerprint: &str) -> io::Result
     let _ = sock.join_multicast_v4(&DISCOVERY_GROUP, &Ipv4Addr::UNSPECIFIED);
 
     let deadline = std::time::Instant::now() + timeout;
-    let mut seen: HashMap<String, Peer> = HashMap::new();
     let mut buf = [0u8; 2048];
     while std::time::Instant::now() < deadline {
         match sock.recv_from(&mut buf) {
@@ -280,7 +308,7 @@ fn listen_on(port: u16, timeout: Duration, self_fingerprint: &str) -> io::Result
                         SocketAddr::V6(_) => continue,
                     };
                     let addr = format!("{ip}:{}", a.port);
-                    seen.entry(addr.clone()).or_insert(Peer {
+                    on_peer(&Peer {
                         addr,
                         fingerprint: a.fingerprint.clone(),
                         name: a.device.name.clone(),
@@ -297,7 +325,7 @@ fn listen_on(port: u16, timeout: Duration, self_fingerprint: &str) -> io::Result
             Err(e) => return Err(e),
         }
     }
-    Ok(seen.into_values().collect())
+    Ok(())
 }
 
 /// 常驻端用：一直广播，直到 stop 置位。

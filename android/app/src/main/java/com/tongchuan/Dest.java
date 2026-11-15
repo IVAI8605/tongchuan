@@ -125,17 +125,21 @@ public final class Dest {
     /**
      * 最后兜底：把选中的内容复制一份到应用缓存再发。
      * 有些 provider 既没有真实路径也不暴露 fd 目标（例如第三方网盘），
-     * 与其让「选择文件」永远报错，不如复制后发送——代价是占一份缓存，且落点文件夹会叫 tc-pick。
+     * 与其让「选择文件」永远报错，不如复制后发送——代价是占一份缓存。
      */
     private static String copyToCache(Context ctx, Uri uri) {
         try {
             String name = queryDisplayName(ctx, uri);
-            File dir = new File(ctx.getCacheDir(), "tc-pick");
+            // v0.13.1：缓存路径要带上来源文件夹名。发送端按「父目录名」生成落点根目录，
+            // 全都直接放在 tc-pick 下会让首页摘要与对端落点都变成 tc-pick（真机实测踩到）。
+            File dir = new File(new File(ctx.getCacheDir(), "tc-pick"), sourceFolderName(ctx, uri));
             if (!dir.isDirectory() && !dir.mkdirs()) {
                 return null;
             }
-            File tmp = new File(dir, name + ".partial");
-            File out = new File(dir, name);
+            // v0.13.1：目标名不能用固定原名。重复选同一个文件时目标已存在，renameTo 会失败，
+            // 旧实现直接返回 null，表现为「选中的某项无法定位」（真机实测踩到）。
+            File out = uniqueFile(dir, name);
+            File tmp = new File(dir, out.getName() + ".partial");
             long copied = 0;
             try (java.io.InputStream in = ctx.getContentResolver().openInputStream(uri);
                  java.io.OutputStream os = new java.io.FileOutputStream(tmp)) {
@@ -158,6 +162,138 @@ public final class Dest {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * 相册选择器给的是 media documents provider 的 URI（documentId 形如 `image:12345`），
+     * 它既没有可用的 `_data`，`relative_path` 也查不到。用里面的 id 去 MediaStore 查一次：
+     * 在「所有文件访问」授权下能拿到真实路径，就不必退回「复制到缓存」（v0.13.1）。
+     */
+    private static String resolveMediaDocumentPath(Context ctx, Uri uri) {
+        Uri item = mediaItemUri(uri);
+        if (item == null) {
+            return null;
+        }
+        try (android.database.Cursor c = ctx.getContentResolver().query(
+                item, new String[]{android.provider.MediaStore.MediaColumns.DATA},
+                null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                String p = c.getString(0);
+                if (p != null && new File(p).isFile()) {
+                    return p;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /** 把 `image:12345` / `video:12345` / `audio:12345` 还原成 MediaStore 里可查的条目 URI。 */
+    private static Uri mediaItemUri(Uri uri) {
+        try {
+            String id = DocumentsContract.getDocumentId(uri);
+            int colon = id.indexOf(':');
+            if (colon <= 0) {
+                return null;
+            }
+            String kind = id.substring(0, colon);
+            long num = Long.parseLong(id.substring(colon + 1));
+            if ("image".equals(kind)) {
+                return android.content.ContentUris.withAppendedId(
+                        android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, num);
+            }
+            if ("video".equals(kind)) {
+                return android.content.ContentUris.withAppendedId(
+                        android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, num);
+            }
+            if ("audio".equals(kind)) {
+                return android.content.ContentUris.withAppendedId(
+                        android.provider.MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, num);
+            }
+        } catch (Exception ignored) {
+            // 非媒体类 documentId（如 primary:DCIM/...）不在这里处理
+        }
+        return null;
+    }
+
+    /**
+     * 来源文件夹名：缓存副本失去真实路径后，靠它恢复「用户从哪个文件夹选的」。
+     * 优先用 MediaStore 的 relative_path（就是相册里看到的文件夹），
+     * 再退回 SAF 的 documentId（形如 primary:DCIM/Camera/xxx.jpg）。
+     */
+    private static String sourceFolderName(Context ctx, Uri uri) {
+        Uri item = mediaItemUri(uri);
+        if (item != null) {
+            try (android.database.Cursor c = ctx.getContentResolver().query(
+                    item, new String[]{"relative_path"}, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                    String seg = lastSegment(c.getString(0));
+                    if (seg != null) {
+                        return seg;
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        try (android.database.Cursor c = ctx.getContentResolver().query(
+                uri, new String[]{"relative_path"}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                String seg = lastSegment(c.getString(0));
+                if (seg != null) {
+                    return seg;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            String id = DocumentsContract.getDocumentId(uri);
+            int colon = id.indexOf(':');
+            String rel = colon >= 0 ? id.substring(colon + 1) : id;
+            int slash = rel.lastIndexOf('/');
+            if (slash > 0) {
+                String seg = lastSegment(rel.substring(0, slash));
+                if (seg != null) {
+                    return seg;
+                }
+            }
+        } catch (Exception ignored) {
+            // 第三方 provider 的 documentId 可能没有目录信息，走下面的兜底名
+        }
+        return "已选文件";
+    }
+
+    /** 取路径最后一段非空目录名；空串或全是分隔符时返回 null。 */
+    private static String lastSegment(String path) {
+        if (path == null) {
+            return null;
+        }
+        String[] parts = path.replace('\\', '/').split("/");
+        for (int i = parts.length - 1; i >= 0; i--) {
+            String s = parts[i].trim();
+            if (!s.isEmpty()) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    /** 在同级目录里找一个没被占用的文件名：name.ext → name (1).ext → …，只新建不覆盖。 */
+    private static File uniqueFile(File dir, String name) {
+        File first = new File(dir, name);
+        if (!first.exists()) {
+            return first;
+        }
+        int dot = name.lastIndexOf('.');
+        String base = dot > 0 ? name.substring(0, dot) : name;
+        String ext = dot > 0 ? name.substring(dot) : "";
+        for (int i = 1; i < 1000; i++) {
+            File cand = new File(dir, base + " (" + i + ")" + ext);
+            if (!cand.exists()) {
+                return cand;
+            }
+        }
+        // 极端情况（同名副本过千）用时间戳兜底，仍然不覆盖任何已有文件
+        return new File(dir, base + "-" + System.currentTimeMillis() + ext);
     }
 
     private static String queryDisplayName(Context ctx, Uri uri) {
@@ -189,6 +325,13 @@ public final class Dest {
             return p != null && new File(p).isFile() ? p : null;
         }
         String p = resolveDocumentPath(uri);
+        if (p != null) {
+            return p;
+        }
+        // v0.13.1：相册选择器（media documents）给的是 image:12345 这种 id，
+        // 先按 id 去 MediaStore 还原真实路径；还原成功就不必复制到缓存，
+        // 首页摘要与对端落点也就不会退化成缓存目录名或「已选文件」。
+        p = resolveMediaDocumentPath(ctx, uri);
         if (p != null) {
             return p;
         }
