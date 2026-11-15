@@ -80,18 +80,53 @@ trust_mode = "closed"
     Write-Output "OK 配置已存在，未改动 $cfgPath"
 }
 
-# 防火墙规则需要管理员。非管理员时 netsh 每次要等十几秒才报「需要提升」，
-# 四条命令累计约 78 秒，安装界面看起来像卡死（2026-11-13 实测）——所以先判权限，没权限就跳过。
+# 防火墙：规则必须由提权进程创建，所以安装器已改成 RequestExecutionLevel admin。
+# 为什么按程序路径而不是按端口：安装路径固定（$LOCALAPPDATA\通传\tc.exe），
+# 将来加端口、改端口都不用重建规则；替换同路径的 exe 也不会再触发「是否允许访问」的询问。
+# 为什么要覆盖三种配置文件：系统按「程序路径 + 网络位置」记账，漏掉一种就会在那个网络里被问一次。
+$fwLog = Join-Path $InstallDir 'install-firewall.log'
+function Write-FwLog([string]$line) {
+    # 写文件而不是只输出：NSIS 静默调用时子进程输出只留在安装窗口，装完就没了
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    Add-Content -LiteralPath $fwLog -Value "$ts $line" -Encoding UTF8
+}
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Write-Output 'WARN 未以管理员运行：已跳过防火墙规则（需要别的设备主动连本机时，用管理员重跑 install.ps1）'
+    # 手动以普通权限跑本脚本时走这里：不动规则，只留痕
+    Write-FwLog 'SKIP 未提权，防火墙规则未改动（安装器正常安装会自动提权）'
+    Write-Output 'WARN 未以管理员运行：已跳过防火墙规则'
 } else {
-    foreach ($proto in @('TCP', 'UDP')) {
-        $ruleName = "通传 $proto 53318"
-        & netsh advfirewall firewall delete rule name="$ruleName" *> $null
-        & netsh advfirewall firewall add rule name="$ruleName" dir=in action=allow protocol=$proto localport=53318 *> $null
-        if ($LASTEXITCODE -eq 0) { Write-Output "OK 防火墙 $proto 53318" }
-        else { Write-Output "WARN 防火墙 $proto 规则未添加，请用管理员运行 install.ps1" }
+    try {
+        $ruleName = '通传 入站'
+        $ruleNamePublic = '通传 入站（公用，限本地子网）'
+        # 先删旧版按端口建的规则（如果历史上手动建过），避免同一程序两套口径
+        foreach ($proto in @('TCP', 'UDP')) {
+            & netsh advfirewall firewall delete rule name="通传 $proto 53318" *> $null
+        }
+        # 关键一步：系统里显式 Block 优先于 Allow。弹窗里点过「取消」会留下 Block 规则，
+        # 不清掉的话新 Allow 规则形同虚设。只动与本安装路径关联、且由弹窗生成的 Block 规则。
+        $prog = (Resolve-Path -LiteralPath $TcPath).Path
+        $blocked = Get-NetFirewallRule | Where-Object {
+            $_.Name -like '*Query User*' -and $_.Action -eq 'Block' -and
+            (($_ | Get-NetFirewallApplicationFilter).Program -eq $prog)
+        }
+        foreach ($r in $blocked) {
+            Write-FwLog "删除弹窗 Block 规则 $($r.Name)（profile=$($r.Profile)）"
+            Remove-NetFirewallRule -Name $r.Name
+        }
+        # 幂等：先删自己建的同名规则，再按当前路径重建
+        Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        Get-NetFirewallRule -DisplayName $ruleNamePublic -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Program $prog `
+            -Action Allow -Protocol Any -Profile Domain,Private | Out-Null
+        # 公用网络只放行本地子网：咖啡厅/热点这类公用网里不对外暴露 53318/53319
+        New-NetFirewallRule -DisplayName $ruleNamePublic -Direction Inbound -Program $prog `
+            -Action Allow -Protocol Any -Profile Public -RemoteAddress LocalSubnet | Out-Null
+        Write-FwLog "OK 已建立入站规则：$ruleName（Domain,Private）+ $ruleNamePublic（Public, 本地子网）"
+        Write-Output 'OK 防火墙入站规则已建立（专用/域全放行，公用限本地子网）'
+    } catch {
+        Write-FwLog "ERROR 防火墙规则未建立：$($_.Exception.Message)"
+        Write-Output "WARN 防火墙规则未建立：$($_.Exception.Message)"
     }
 }
 

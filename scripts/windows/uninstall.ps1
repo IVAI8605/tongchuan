@@ -13,7 +13,7 @@ Write-Output '=== 将清理的注册表范围（只列清单）==='
 Write-Output 'HKCU:\Software\Classes\Directory\shell\TongchuanSend（整键）'
 Write-Output 'HKCU:\Software\Classes\*\shell\TongchuanSend（整键）'
 Write-Output 'HKCU:\...\Run 下的 Tongchuan 值'
-Write-Output '防火墙规则：通传 TCP 53318 / 通传 UDP 53318'
+Write-Output '防火墙规则：通传 入站 / 通传 入站（公用，限本地子网）'
 Write-Output '不删除：配置文件、日志、历史、收到的文件、身份证书'
 
 if (-not $Confirm) {
@@ -24,7 +24,8 @@ if (-not $Confirm) {
 Remove-Item -Path $keys[0] -Recurse -ErrorAction SilentlyContinue
 Remove-Item -Path $keys[1] -Recurse -ErrorAction SilentlyContinue
 Remove-ItemProperty -Path $keys[2] -Name 'Tongchuan' -ErrorAction SilentlyContinue
-foreach ($proto in @('TCP', 'UDP')) {
-    & netsh advfirewall firewall delete rule name="通传 $proto 53318" *> $null
+# v0.20.0 起规则按程序路径建：名字固定为这两条，删除时只按名字删，不动系统里其他规则
+foreach ($rn in @('通传 入站', '通传 入站（公用，限本地子网）')) {
+    Get-NetFirewallRule -DisplayName $rn -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 }
 Write-Output 'OK 已清理右键菜单、登录启动与防火墙规则；用户数据未动'

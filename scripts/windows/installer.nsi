@@ -17,7 +17,10 @@ Unicode true
 Name "${APPNAME} ${VERSION}"
 OutFile "${OUT_DIR}\通传-${VERSION}-setup.exe"
 InstallDir "$LOCALAPPDATA\通传"
-RequestExecutionLevel user
+; v0.20.0：改为 admin。防火墙规则必须由提权进程创建，
+; 之前用 user 时 install.ps1 里的管理员判断恒为假，规则从未建立（UAC「从不通知」也一样，
+; 令牌仍是筛选后的标准用户）。同一账号提权后 $LOCALAPPDATA 与 HKCU 仍指向本用户。
+RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 
 Page directory
