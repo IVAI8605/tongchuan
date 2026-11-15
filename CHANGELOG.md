@@ -14,7 +14,8 @@
 - 兼容：不改协议字段。0.18 端会被版本门禁拒绝，需三端同版 0.19.0。
 - 测试：`cargo test --workspace` 121 项全绿；新增 10 项（mtime 写回、小文件残留清理与删除边界、缓存命中/失效/坏行）。
 - 门禁：`scripts/verify.ps1` 8/8 PASS（`cache\通传-验证\20261115-162231\`）。
-- 产物（只留本地）：Windows zip / setup、Android arm64 APK、Linux x64 均在 `_外置\备份\release-v0.19.0-资产临时\`，各附 SHA256；未部署、未 push、未建 Release。
+- 产物（只留本地）：Windows zip / setup、Android arm64 APK、Linux x64 均在 `_外置\备份\release-v0.19.0-资产临时\`，各附 SHA256；未 push、未建 Release。
+- 已知限制（2026-11-15 真机验证发现）：systemd `ProtectSystem=strict` 下，`hash-cache.jsonl` 所在目录必须在 `ReadWritePaths` 内，否则缓存文件建不出来、开关看似打开却不生效（服务与其他功能不受影响）。NAS 单元默认只放行了子目录，使用前需把该文件路径加进白名单。
 
 ## v0.18.0 — 2026-11-15 16:05
 
