@@ -690,3 +690,69 @@ pub fn apply_to_clipboard(text: &str) -> io::Result<()> {
 pub fn read_from(stream: &mut BoxedStream) -> io::Result<ClipMsg> {
     read_msg(stream)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 预览按「字符」截断，多字节中文不会在半个字节处断开；换行压成空格，
+    /// 超长才补省略号——通知栏里换行会被截成半句话。
+    #[test]
+    fn preview_truncates_by_chars_and_flattens_newlines() {
+        assert_eq!(preview_of("你好\n世界"), "你好 世界");
+        assert!(!preview_of("a\r\nb").contains(['\r', '\n']));
+
+        let long: String = "字".repeat(PREVIEW_LEN + 50);
+        let p = preview_of(&long);
+        assert_eq!(p.chars().count(), PREVIEW_LEN + 1, "前 N 个字符 + 一个省略号");
+        assert!(p.ends_with('…'));
+        assert!(p.starts_with('字'));
+    }
+
+    /// 事件 id 取内容哈希前 16 位；元数据事件不带正文（正文另起 ClipBody 帧）。
+    #[test]
+    fn from_text_sets_id_preview_and_omits_body() {
+        let ev = ClipEvent::from_text("pc", 7, "hello world", true);
+        assert_eq!(ev.hash, crate::hash::hash_bytes(b"hello world"));
+        assert_eq!(ev.id, ev.hash.chars().take(16).collect::<String>());
+        assert_eq!(ev.id.chars().count(), 16);
+        assert_eq!(ev.origin, "pc");
+        assert_eq!(ev.lamport, 7);
+        assert_eq!(ev.size, "hello world".len());
+        assert_eq!(ev.preview, "hello world");
+        assert!(ev.text.is_none(), "元数据事件不应带正文");
+        assert!(ev.sensitive);
+    }
+
+    /// 去重：同 id、或最近 5 条内同内容，都拒绝；接受后 lamport 取 max+1，latest 不留正文。
+    #[test]
+    fn ledger_dedupes_by_id_and_recent_hash_and_advances_lamport() {
+        let mut l = ClipLedger::new();
+        let ev = ClipEvent::from_text("pc", 1, "第一条", false);
+        assert!(l.accept(&ev), "首次应接受");
+        assert!(!l.accept(&ev), "同 id 重复应拒绝");
+        assert_eq!(l.lamport(), 2, "lamport = max(本地, 对端) + 1");
+
+        // 同样内容（同 hash）即使换了 id，也应被「最近 5 条」拦下
+        let mut same_content = ev.clone();
+        same_content.id = "another-id".into();
+        same_content.lamport = 99;
+        assert!(!l.accept(&same_content), "同内容近 5 条应拒绝");
+        assert!(l.latest().unwrap().text.is_none(), "latest 里不应留正文");
+    }
+
+    /// 同内容被挤出「最近 5 条」窗口后可以再次接受（断线重连补发场景）。
+    #[test]
+    fn ledger_allows_old_content_again_after_window() {
+        let mut l = ClipLedger::new();
+        let first = ClipEvent::from_text("pc", 0, "重复内容", false);
+        assert!(l.accept(&first));
+        for i in 0..5 {
+            let e = ClipEvent::from_text("pc", i, &format!("其它内容{i}"), false);
+            assert!(l.accept(&e));
+        }
+        let mut again = first.clone();
+        again.id = "again-id".into();
+        assert!(l.accept(&again), "同内容超出最近 5 条后应可再次接受");
+    }
+}
