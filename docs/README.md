@@ -1,12 +1,12 @@
 # 通传 · 开发速查
 
-> 这份就够日常看。旧的规划、实测报告和历史版本说明已移到
-> `/vol1/1000/SSD/cache/DSH/20261117-通传精简/旧文档/docs-old/`，需要追溯再去翻。
+> 这份就够日常看。旧的规划、实测报告和历史版本说明已移到项目外的隔离区
+> （`cache/DSH/20261117-通传精简/旧文档/docs-old/`），需要追溯再去翻。
 
 ## 项目
 
 局域网文件夹互传工具：电脑、手机、NAS 之间走文件通道传目录，不走云端。
-源码在 `/vol1/1000/SSD/DSH/AI/通传/src`，Linux 运行二进制在 `/vol1/1000/SSD/DSH/AI/通传/tc`。
+源码在本仓库根目录，Linux 运行二进制在项目上一级（NAS 部署位）。
 
 当前版本：`0.20.1`（唯一来源 `Cargo.toml` 的 `workspace.package.version`）。
 协议：`0.20`；主次版本相同的 0.20.x 可互通。Android 当前 `0.20.1`，Windows `tc.exe` 仍为 `0.20.0`，可接。
@@ -21,15 +21,16 @@
 | `scripts/windows/` | Windows 托盘、右键菜单、隐藏发送、截屏剪贴板桥 |
 | `configs/` | 配置模板；本机 `config.toml` 不入库 |
 | `tests/windows/` | PowerShell 回归测试 |
-| `dist/通传-0.20.1.apk` | 最近的 Android 交付包（本地产物，不提交） |
+| `../dist/通传-0.20.1.apk` | 最近的 Android 交付包（本地产物，不提交） |
 
 运行数据在项目根的 `identity/`、`logs/`、`queue/`、`received/`，含设备私钥，不入库、不重构。
 
 ## 常用命令
 
 ```bash
-source /vol1/1000/SSD/DSH/AI/_tool/env.sh
-cd /vol1/1000/SSD/DSH/AI/通传/src
+# 先加载 NAS 工具 PATH
+source <工具目录>/env.sh
+cd <仓库根目录>
 
 cargo test --workspace
 pwsh -NoProfile -File scripts/verify.ps1
