@@ -24,6 +24,11 @@
 - `start-hidden.vbs` 用 `WshShell.Run cmd, 0, False`，窗口从创建起就是隐藏的；文件以 UTF-16LE 带 BOM 保存（VBScript 按 ANSI 读会弄乱中文路径）。
 - 自动化会话里必须常驻时（会话结束会回收子进程），用一次性计划任务执行上面这条 wscript 命令，跑完把任务删掉。
 
+### 文档入口
+
+- 当前状态与待办看 `项目状态卡.md`（本地工作状态，不入库）。
+- 现行文档索引看 `docs/README.md`；已完成的版本规划和旧方案在 `docs/archive/`，不再把归档文档当现行入口。
+
 ### Linux 包构建
 
 - 一律在 Linux 服务器本机原生编译，不做 Windows 交叉编译（本机没有 zig / musl-gcc / cargo-zigbuild，交叉编译也从未验证过）。
