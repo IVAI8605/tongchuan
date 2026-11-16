@@ -38,7 +38,7 @@ android/             Android 应用（Java + Gradle）
 configs/             配置模板与 systemd unit 模板
 scripts/             构建与验证脚本（verify.ps1、android/、windows/）
 tests/               集成测试（端到端、并发、信任门禁、剪贴板）
-docs/                设计与规划文档
+docs/                开发速查（旧规划/报告已移入隔离区）
 assets/              图标等静态资源
 ```
 
@@ -147,7 +147,7 @@ tc diag                                                 # 导出诊断包
 ## 文档
 
 - [CHANGELOG.md](./CHANGELOG.md)：逐次改动与实测记录
-- `docs/`：协议与功能设计、版本规划、LocalSend 协议逆向分析、传输提速实测
+- `docs/`：当前开发速查；旧规划、报告和归档已移到 `cache/DSH/20261117-通传精简/旧文档/docs-old/`
 - 内部部署与运维文档不随仓库分发
 
 ## 许可
