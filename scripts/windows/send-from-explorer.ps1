@@ -1,5 +1,7 @@
 ﻿# Explorer「发送到」入口：接收目标与所有选中路径，调用 tc send。
 # SendTo 快捷方式把选中项追加到本脚本参数末尾；Paths 用 ValueFromRemainingArguments 接住。
+# 关闭位置参数绑定：否则未命名的前两个路径会被 DestId/Paths 吞掉（多选发送会错位）。
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Mandatory = $true)][string]$Target,
     [string]$PeerFp = '',
