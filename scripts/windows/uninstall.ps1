@@ -28,4 +28,10 @@ Remove-ItemProperty -Path $keys[2] -Name 'Tongchuan' -ErrorAction SilentlyContin
 foreach ($rn in @('通传 入站', '通传 入站（公用，限本地子网）')) {
     Get-NetFirewallRule -DisplayName $rn -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 }
-Write-Output 'OK 已清理右键菜单、登录启动与防火墙规则；用户数据未动'
+# 清理托盘生成的 Explorer「发送到」快捷方式，只按自己的前缀匹配，不碰用户其它链接
+$sendTo = [Environment]::GetFolderPath('SendTo')
+if ($sendTo -and (Test-Path -LiteralPath $sendTo)) {
+    Get-ChildItem -LiteralPath $sendTo -Filter '通传-发送到-*.lnk' -File -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
+Write-Output 'OK 已清理右键菜单、SendTo 链接、登录启动与防火墙规则；用户数据未动'

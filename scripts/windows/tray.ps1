@@ -24,6 +24,11 @@ if (-not (Test-Path $Config)) { Write-Output "ERROR config.toml not found: $Conf
 # 这两个函数必须定义在单实例判断之前：双击图标时托盘往往已经在跑，
 # 第二个实例要先把页面打开再退出（v0.13.3）。
 $appDir = Split-Path -Parent $TcPath
+
+# 右键“发送到”入口的纯参数模块；安装版和仓库版都在同一个 scripts 目录。
+$ctxModule = Join-Path $PSScriptRoot 'TcContextMenu.ps1'
+if (Test-Path -LiteralPath $ctxModule) { . $ctxModule }
+
 function Get-ManageUrl {
     $idDir = $null
     if (Test-Path $Config) {
@@ -173,6 +178,38 @@ function Update-Menu {
     }
 }
 
+# Explorer 的“发送到”菜单：SendTo 快捷方式会把所有选中项追加到 PowerShell 参数末尾，
+# 由 send-from-explorer.ps1 用 ValueFromRemainingArguments 接住，因此多选文件/文件夹也不用 COM 扩展。
+# 只更新链接，不删除历史链接；目标消失时旧链接可能失效，重装/清理时由 uninstall.ps1 处理。
+function Update-SendToLinks {
+    if (-not (Get-Command Get-TcSafeLinkName -ErrorAction SilentlyContinue)) { return }
+    $targets = @(Get-Targets)
+    if ($targets.Count -eq 0) { return }
+    if ($targets.Count -gt 5) { $targets = $targets[0..4] }
+    $sendTo = [Environment]::GetFolderPath('SendTo')
+    if (-not $sendTo -or -not (Test-Path -LiteralPath $sendTo)) { return }
+    $script = Join-Path $PSScriptRoot 'send-from-explorer.ps1'
+    if (-not (Test-Path -LiteralPath $script)) { return }
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $powershell)) { return }
+
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($t in $targets) {
+        $name = if ($t.name) { [string]$t.name } else { [string]$t.addr }
+        $safe = Get-TcSafeLinkName $name
+        $link = Join-Path $sendTo ("通传-发送到-{0}.lnk" -f $safe)
+        $lnk = $shell.CreateShortcut($link)
+        $lnk.TargetPath = $powershell
+        $sendArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Target "{1}"' -f $script, $t.addr
+        if ($t.fp) { $sendArgs += (' -PeerFp "{0}"' -f $t.fp) }
+        $lnk.Arguments = $sendArgs
+        $lnk.WorkingDirectory = $appDir
+        $lnk.Description = '用通传发送到 ' + $name
+        $lnk.WindowStyle = 1
+        $lnk.Save()
+    }
+}
+
 if ($Headless) {
     Write-Output 'HEADLESS 只启动 daemon，等待退出'
     if ($daemon) { $daemon.WaitForExit() } else { while ($true) { Start-Sleep -Seconds 30 } }
@@ -276,7 +313,8 @@ try {
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 30000
-$timer.add_Tick({ Update-Menu })
+$timer.add_Tick({ Update-Menu; Update-SendToLinks })
 Update-Menu
+Update-SendToLinks
 $timer.Start()
 [System.Windows.Forms.Application]::Run()

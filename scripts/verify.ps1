@@ -1,4 +1,4 @@
-# 通传 v0.2 离线三件套：构建 → 测试 → TLS 命令行回环 → 产物校验。
+﻿# 通传 v0.2 离线三件套：构建 → 测试 → TLS 命令行回环 → 产物校验。
 # 只回 PASS/FAIL 摘要；完整日志留在临时目录，不进对话。
 # 脚本只创建文件，不删除任何文件；测试产物保留，需要清理时另列清单问用户。
 # PowerShell 5.1 会把外部命令的 stderr 当成错误流；用 Stop 会让 cargo 的正常编译输出直接中断脚本。
@@ -175,7 +175,7 @@ auto_accept = true
 
 # 5) Windows 外壳脚本产物完整、PowerShell 语法可解析、含中文脚本带 BOM
 $winDir = JP $root 'scripts\windows'
-$scriptFiles = @('install.ps1', 'uninstall.ps1', 'tray.ps1')
+$scriptFiles = @('install.ps1', 'uninstall.ps1', 'tray.ps1', 'TcContextMenu.ps1', 'send-from-explorer.ps1')
 $scriptOk = $true
 foreach ($f in $scriptFiles) {
     $p = Join-Path $winDir $f
