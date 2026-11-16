@@ -40,8 +40,8 @@ foreach ($r in $roots) {
 # 托盘启动后会按历史/发现到的设备填真实地址，缺失时显示“未发现可用目标”。
 foreach ($root in @('HKCU:\Software\Classes\Directory\shell', 'HKCU:\Software\Classes\*\shell')) {
     foreach ($item in @(
-        @{ Id = 'TongchuanSendPhone'; Name = '发送到手机' },
-        @{ Id = 'TongchuanSendNAS'; Name = '发送到NAS' }
+        @{ Id = 'TongchuanSendPhone'; Name = '通传发送到手机' },
+        @{ Id = 'TongchuanSendNAS'; Name = '通传发送到NAS' }
     )) {
         $k = Join-Path $root $item.Id
         New-Item -Path $k -Force -Value $item.Name | Out-Null

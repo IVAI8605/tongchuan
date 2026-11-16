@@ -188,10 +188,10 @@ function Update-SendToLinks {
     if ($targets.Count -gt 5) { $targets = $targets[0..4] }
     $sendTo = [Environment]::GetFolderPath('SendTo')
     if (-not $sendTo -or -not (Test-Path -LiteralPath $sendTo)) { return }
-    $script = Join-Path $PSScriptRoot 'send-from-explorer.ps1'
-    if (-not (Test-Path -LiteralPath $script)) { return }
-    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    if (-not (Test-Path -LiteralPath $powershell)) { return }
+    $vbs = Join-Path $PSScriptRoot 'send-hidden.vbs'
+    if (-not (Test-Path -LiteralPath $vbs)) { return }
+    $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    if (-not (Test-Path -LiteralPath $wscript)) { return }
 
     $shell = New-Object -ComObject WScript.Shell
     foreach ($t in $targets) {
@@ -199,13 +199,11 @@ function Update-SendToLinks {
         $safe = Get-TcSafeLinkName $name
         $link = Join-Path $sendTo ("通传-发送到-{0}.lnk" -f $safe)
         $lnk = $shell.CreateShortcut($link)
-        $lnk.TargetPath = $powershell
-        $sendArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Target "{1}"' -f $script, $t.addr
-        if ($t.fp) { $sendArgs += (' -PeerFp "{0}"' -f $t.fp) }
-        $lnk.Arguments = $sendArgs
+        $lnk.TargetPath = $wscript
+        $lnk.Arguments = '//B //Nologo "{0}" "{1}" "{2}" "{3}"' -f $vbs, $TcPath, $t.addr, $t.fp
         $lnk.WorkingDirectory = $appDir
-        $lnk.Description = '用通传发送到 ' + $name
-        $lnk.WindowStyle = 1
+        $lnk.Description = '通传发送到 ' + $name
+        $lnk.WindowStyle = 7
         $lnk.Save()
     }
 }
@@ -218,19 +216,21 @@ function Update-DirectMenu {
     if (-not $phone -and $targets.Count -ge 1) { $phone = $targets[0] }
     if (-not $nas -and $targets.Count -ge 2) { $nas = $targets[1] }
 
+    $vbs = Join-Path $PSScriptRoot 'send-hidden.vbs'
+    $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    if (-not (Test-Path -LiteralPath $vbs) -or -not (Test-Path -LiteralPath $wscript)) { return }
+
     function SendCommandFor($t) {
         if (-not $t) { return 'cmd /c echo 未发现可用目标 & pause' }
-        $cmd = '"{0}" send --to {1}' -f $TcPath, $t.addr
-        if ($t.fp) { $cmd += (' --peer-fp {0}' -f $t.fp) }
-        return $cmd + ' --dir "%1" --retry'
+        return ('"{0}" //B //Nologo "{1}" "{2}" "{3}" "{4}" "%1"' -f $wscript, $vbs, $TcPath, $t.addr, $t.fp)
     }
 
     foreach ($root in @(
         'HKCU:\Software\Classes\Directory\shell',
         'HKCU:\Software\Classes\*\shell')) {
         foreach ($pair in @(
-            @{ Id = 'TongchuanSendPhone'; Label = '发送到手机'; Target = $phone },
-            @{ Id = 'TongchuanSendNAS'; Label = '发送到NAS'; Target = $nas }
+            @{ Id = 'TongchuanSendPhone'; Label = '通传发送到手机'; Target = $phone },
+            @{ Id = 'TongchuanSendNAS'; Label = '通传发送到NAS'; Target = $nas }
         )) {
             $k = Join-Path $root $pair.Id
             if (-not (Test-Path -LiteralPath $k)) { continue }
