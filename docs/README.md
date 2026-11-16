@@ -1,35 +1,55 @@
-# 通传文档索引
+# 通传 · 开发速查
 
-> 先看项目入口： [README.md](../README.md) · [AGENTS.md](../AGENTS.md) · 本地 `项目状态卡.md`
-> 这里只放“现在要读的文档”和“历史归档”的索引，避免在 `docs/` 里翻旧版本规划。
+> 这份就够日常看。旧的规划、实测报告和历史版本说明已移到
+> `/vol1/1000/SSD/cache/DSH/20261117-通传精简/旧文档/docs-old/`，需要追溯再去翻。
 
-## 现行文档
+## 项目
 
-| 文档 | 用途 |
+局域网文件夹互传工具：电脑、手机、NAS 之间走文件通道传目录，不走云端。
+源码在 `/vol1/1000/SSD/DSH/AI/通传/src`，Linux 运行二进制在 `/vol1/1000/SSD/DSH/AI/通传/tc`。
+
+当前版本：`0.20.1`（唯一来源 `Cargo.toml` 的 `workspace.package.version`）。
+协议：`0.20`；主次版本相同的 0.20.x 可互通。Android 当前 `0.20.1`，Windows `tc.exe` 仍为 `0.20.0`，可接。
+
+## 目录
+
+| 路径 | 用途 |
 |---|---|
-| [功能展望-版本路线.md](./功能展望-版本路线.md) | 产品方向、版本路线、后续候选池 |
-| [局域网文件夹互传项目规划.md](./局域网文件夹互传项目规划.md) | 项目总体目标、协议与三端落地设计 |
-| [传输提速-规划.md](./传输提速-规划.md) | 传输性能基线、瓶颈与优化方案 |
-| [服务器端-维护手册.md](./服务器端-维护手册.md) | NAS/Linux 部署、升级、回滚与日常维护 |
-| [服务器端-开发计划.md](./服务器端-开发计划.md) | 服务器端已交付范围与可选方向 |
-| [2026-11-15_同类项目可选项评估.md](./2026-11-15_同类项目可选项评估.md) | 同类项目与后续功能取舍依据 |
-| [2026-11-15_机械盘接收端优化实测报告.md](./2026-11-15_机械盘接收端优化实测报告.md) | 机械盘接收端性能实测结论 |
-| [LocalSend逆向分析.md](./LocalSend逆向分析.md) | 同类协议与实现参考（历史调研，读结论即可） |
-| [reports/2026-11-12_传输提速-实测数据.html](./reports/2026-11-12_传输提速-实测数据.html) | 历史性能实测原始报告 |
+| `crates/tc-core` | 传输协议、会话、信任、剪贴板内核 |
+| `crates/tc-jni` | Android JNI 门面 |
+| `android/` | Android 客户端（包名 `com.tongchuan`） |
+| `scripts/windows/` | Windows 托盘、右键菜单、隐藏发送、截屏剪贴板桥 |
+| `configs/` | 配置模板；本机 `config.toml` 不入库 |
+| `tests/windows/` | PowerShell 回归测试 |
+| `dist/通传-0.20.1.apk` | 最近的 Android 交付包（本地产物，不提交） |
 
-## 历史归档
+运行数据在项目根的 `identity/`、`logs/`、`queue/`、`received/`，含设备私钥，不入库、不重构。
 
-已完成的版本规划和旧方案统一放在 [`archive/`](./archive/)：
+## 常用命令
 
-- `archive/版本规划-v0.5.2.md`、`v0.5.3`、`v0.5.4`、`v0.6`
-- `archive/版本规划-v0.14.md`、`v0.15`、`v0.16`
-- `archive/手机发送-v0.7.md`
-- `archive/版本规划.md`、`archive/HISTORY.md`、`archive/RELEASE.md`、`archive/5.4-信任库-方案.md`
+```bash
+source /vol1/1000/SSD/DSH/AI/_tool/env.sh
+cd /vol1/1000/SSD/DSH/AI/通传/src
 
-归档文档只用于追溯历史，不作为当前开发入口；新版本设计完成后也应移入 `archive/`。
+cargo test --workspace
+pwsh -NoProfile -File scripts/verify.ps1
+
+# Android
+gradle --offline --no-daemon -p android assembleRelease
+
+# Windows 打包（在 Windows 侧跑）
+pwsh -NoProfile -File scripts/windows/make-installer.ps1
+```
+
+## 当前功能
+
+- 文件/文件夹发送：`tc send --to <addr> --peer-fp <fp> --dir <path>`；Android/Windows 客户端封装。
+- Windows 右键：`通传发送到手机` / `通传发送到NAS`，走 `wscript + send-hidden.vbs`，无命令窗。
+- 剪贴板：文本同步走 `tc clip`；手机截屏自动发送见下。
+- 截屏同步（0.20.1）：Android `ScreenshotWatcher` 监听 `Pictures/Screenshots`，新截图走文件通道到电脑；Windows `screenshot-clipboard.ps1` 把收到的 `Screenshot*` 图片写入剪贴板。
 
 ## 约定
 
-- 版本规划按 `版本规划-v<版本>.md` 命名；发布完成后归档。
-- 实测报告按 `YYYY-MM-DD_主题.md` 命名，原始数据放 `cache/`，不把临时截图和日志塞进 `docs/`。
-- 当前项目状态统一看本地 `项目状态卡.md`，不复制成多份说明。
+- 只本地提交，未经明确允许不 push、不建 Release。
+- 清理只移不删，移动前留清单；不写 `identity/identity.key`、`config.toml`、`.cargo/config.toml`、运行时数据。
+- 构建产物放项目外；仓库只保留源码、脚本、模板和这份速查。
