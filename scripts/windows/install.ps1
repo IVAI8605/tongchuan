@@ -21,6 +21,8 @@ foreach ($r in $roots) {
     # 必须 LiteralPath：路径里的 * 会被当成通配符去枚举整个 Classes 树，
     # 实测一次 New-ItemProperty 要 69 秒，安装界面看起来就是卡死（2026-11-13 实测）
     New-ItemProperty -LiteralPath $r -Name 'SubCommands' -Value '' -PropertyType String -Force | Out-Null
+    # Windows 11 对空 SubCommands 的老式子菜单不展开；新入口改一级直达项，旧键保留但隐藏
+    New-ItemProperty -LiteralPath $r -Name 'LegacyDisable' -Value '1' -PropertyType String -Force | Out-Null
     $shell = Join-Path $r 'shell'
     New-Item -Path $shell -Force | Out-Null
     # 固定 5 个设备槽位，由 tray.ps1 覆写；不删旧项，避免任何破坏性操作
@@ -32,6 +34,21 @@ foreach ($r in $roots) {
     $m = Join-Path $shell 'Manage'
     New-Item -Path $m -Force -Value '打开管理页' | Out-Null
     New-Item -Path (Join-Path $m 'command') -Force -Value "powershell.exe -NoProfile -WindowStyle Hidden -Command `"Start-Process '$ManageUrl'`"" | Out-Null
+}
+
+# v0.21：Windows 11 新式右键菜单不展开旧的空 SubCommands 子菜单，增加两个一级直达项；
+# 托盘启动后会按历史/发现到的设备填真实地址，缺失时显示“未发现可用目标”。
+foreach ($root in @('HKCU:\Software\Classes\Directory\shell', 'HKCU:\Software\Classes\*\shell')) {
+    foreach ($item in @(
+        @{ Id = 'TongchuanSendPhone'; Name = '发送到手机' },
+        @{ Id = 'TongchuanSendNAS'; Name = '发送到NAS' }
+    )) {
+        $k = Join-Path $root $item.Id
+        New-Item -Path $k -Force -Value $item.Name | Out-Null
+        New-ItemProperty -LiteralPath $k -Name 'MUIVerb' -Value $item.Name -PropertyType String -Force | Out-Null
+        New-ItemProperty -LiteralPath $k -Name 'MultiSelectModel' -Value 'Player' -PropertyType String -Force | Out-Null
+        New-Item -Path (Join-Path $k 'command') -Force -Value 'cmd /c echo 未发现可用目标 & pause' | Out-Null
+    }
 }
 
 # 「通传：再次发送上一批」：把历史里上一批路径原样再发一次（tc resend --id last --retry）。

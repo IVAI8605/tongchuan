@@ -23,6 +23,13 @@ if (-not $Confirm) {
 
 Remove-Item -Path $keys[0] -Recurse -ErrorAction SilentlyContinue
 Remove-Item -Path $keys[1] -Recurse -ErrorAction SilentlyContinue
+foreach ($k in @(
+    'HKCU:\Software\Classes\Directory\shell\TongchuanSendPhone',
+    'HKCU:\Software\Classes\*\shell\TongchuanSendPhone',
+    'HKCU:\Software\Classes\Directory\shell\TongchuanSendNAS',
+    'HKCU:\Software\Classes\*\shell\TongchuanSendNAS')) {
+    Remove-Item -Path $k -Recurse -ErrorAction SilentlyContinue
+}
 Remove-ItemProperty -Path $keys[2] -Name 'Tongchuan' -ErrorAction SilentlyContinue
 # v0.20.0 起规则按程序路径建：名字固定为这两条，删除时只按名字删，不动系统里其他规则
 foreach ($rn in @('通传 入站', '通传 入站（公用，限本地子网）')) {

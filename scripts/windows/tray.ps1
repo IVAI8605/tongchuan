@@ -210,6 +210,39 @@ function Update-SendToLinks {
     }
 }
 
+# Windows 11 不展开旧的空 SubCommands 子菜单，改成两个一级动词；这里按历史/发现结果填命令。
+function Update-DirectMenu {
+    $targets = @(Get-Targets)
+    $phone = @($targets | Where-Object { [string]$_.name -match '(?i)手机|phone|vivo|android|V2551' })[0]
+    $nas = @($targets | Where-Object { [string]$_.name -match '(?i)nas|fnos|飞牛|IVAI-fnOS' })[0]
+    if (-not $phone -and $targets.Count -ge 1) { $phone = $targets[0] }
+    if (-not $nas -and $targets.Count -ge 2) { $nas = $targets[1] }
+
+    function SendCommandFor($t) {
+        if (-not $t) { return 'cmd /c echo 未发现可用目标 & pause' }
+        $cmd = '"{0}" send --to {1}' -f $TcPath, $t.addr
+        if ($t.fp) { $cmd += (' --peer-fp {0}' -f $t.fp) }
+        return $cmd + ' --dir "%1" --retry'
+    }
+
+    foreach ($root in @(
+        'HKCU:\Software\Classes\Directory\shell',
+        'HKCU:\Software\Classes\*\shell')) {
+        foreach ($pair in @(
+            @{ Id = 'TongchuanSendPhone'; Label = '发送到手机'; Target = $phone },
+            @{ Id = 'TongchuanSendNAS'; Label = '发送到NAS'; Target = $nas }
+        )) {
+            $k = Join-Path $root $pair.Id
+            if (-not (Test-Path -LiteralPath $k)) { continue }
+            # 只改自己创建的两个一级项；不创建/删除其它 verb
+            $label = if ($pair.Target) { $pair.Label } else { $pair.Label + '（未发现）' }
+            New-Item -Path $k -Force -Value $label | Out-Null
+            New-ItemProperty -LiteralPath $k -Name 'MUIVerb' -Value $label -PropertyType String -Force | Out-Null
+            New-Item -Path (Join-Path $k 'command') -Force -Value (SendCommandFor $pair.Target) | Out-Null
+        }
+    }
+}
+
 if ($Headless) {
     Write-Output 'HEADLESS 只启动 daemon，等待退出'
     if ($daemon) { $daemon.WaitForExit() } else { while ($true) { Start-Sleep -Seconds 30 } }
@@ -313,8 +346,9 @@ try {
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 30000
-$timer.add_Tick({ Update-Menu; Update-SendToLinks })
+$timer.add_Tick({ Update-Menu; Update-SendToLinks; Update-DirectMenu })
 Update-Menu
 Update-SendToLinks
+Update-DirectMenu
 $timer.Start()
 [System.Windows.Forms.Application]::Run()
