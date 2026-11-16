@@ -249,6 +249,19 @@ if ($Headless) {
     exit 0
 }
 
+# 手机截图自动进剪贴板：独立隐藏 PowerShell（-STA 才能用 Clipboard.SetImage），
+# 监听接收目录里的 Screenshot* 图片；脚本自己带单实例互斥量。
+function Start-ScreenshotClipboard {
+    $shotScript = Join-Path $PSScriptRoot 'screenshot-clipboard.ps1'
+    if (-not (Test-Path -LiteralPath $shotScript)) { return }
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $ps)) { return }
+    $inbox = Join-Path $appDir 'received'
+    $argLine = '-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Inbox "{1}"' -f $shotScript, $inbox
+    try { Start-Process -FilePath $ps -ArgumentList $argLine -WindowStyle Hidden | Out-Null } catch { }
+}
+Start-ScreenshotClipboard
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 

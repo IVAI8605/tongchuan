@@ -175,7 +175,7 @@ auto_accept = true
 
 # 5) Windows 外壳脚本产物完整、PowerShell 语法可解析、含中文脚本带 BOM
 $winDir = JP $root 'scripts\windows'
-$scriptFiles = @('install.ps1', 'uninstall.ps1', 'tray.ps1', 'TcContextMenu.ps1', 'send-from-explorer.ps1')
+$scriptFiles = @('install.ps1', 'uninstall.ps1', 'tray.ps1', 'TcContextMenu.ps1', 'send-from-explorer.ps1', 'screenshot-clipboard.ps1')
 $scriptOk = $true
 foreach ($f in $scriptFiles) {
     $p = Join-Path $winDir $f

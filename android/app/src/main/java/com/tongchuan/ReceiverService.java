@@ -90,6 +90,8 @@ public class ReceiverService extends Service {
         startForeground(NOTIFICATION_ID, buildNotification("正在等待接收"));
         acquireKeepAliveLocks();
         launchReceiver();
+        // v0.21：常驻接收时同时监听截图目录，新截图自动走文件通道发给电脑
+        ScreenshotWatcher.start(this);
     }
 
     /**
@@ -178,6 +180,7 @@ public class ReceiverService extends Service {
 
     @Override
     public void onDestroy() {
+        ScreenshotWatcher.stop();
         if (handle >= 0) {
             TcNative.stopReceiver(handle);
             handle = -1;
