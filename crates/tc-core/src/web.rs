@@ -2,6 +2,7 @@
 //! 只用一个极小的 HTTP/1.1 服务，不引入 Web 框架，方便在无 GUI 的 NAS 上单文件部署。
 
 use crate::daemon::{DaemonState, PeerInfo};
+use crate::trust::{TrustEvent, TrustedPeer};
 use crate::queue::now_secs;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -419,6 +420,113 @@ struct Status<'a> {
     peers: Vec<PeerInfo>,
 }
 
+// ── 管理页 API 响应契约（v0.21.0）
+//
+// 原先这些响应是 serde_json::json! 动态构造的，字段名只存在于字面量里：
+// 改错字段名编译不报错、前端也看不出来，只能靠人肉对着页面数。
+// 这里改为具名 struct，字段名写在 struct 上、由编译器保证序列化结构。
+//
+// 约束：字段名与原 json! 完全一致（含 camelCase，用 serde rename 保留），
+// 不改变对外 JSON 形态；改字段名会同步改这里，前端契约一眼可查。
+
+/// 目录浏览响应（GET /api/dirs）。
+#[derive(Serialize)]
+struct DirListResp {
+    path: String,
+    parent: Option<String>,
+    dirs: Vec<String>,
+    labels: HashMap<String, String>,
+}
+
+/// 通用错误响应（{"error": "..."}）。
+#[derive(Serialize)]
+struct ErrorResp {
+    error: String,
+}
+
+/// 通用成功响应（{"ok": true}）。
+#[derive(Serialize)]
+struct OkResp {
+    ok: bool,
+}
+
+/// 失败带错误（{"ok": false, "error": "..."}）。
+#[derive(Serialize)]
+struct OkErrorResp {
+    ok: bool,
+    error: String,
+}
+
+/// 配对不可用：自动判断局域网地址失败。
+#[derive(Serialize)]
+struct PairUnavailableResp {
+    ok: bool,
+    active: bool,
+    reason: String,
+}
+
+/// 配对失败带原因（{"ok": false, "reason": "..."}）。
+#[derive(Serialize)]
+struct PairFailResp {
+    ok: bool,
+    reason: String,
+}
+
+/// 配对二维码已生成。
+#[derive(Serialize)]
+struct PairActiveResp {
+    ok: bool,
+    active: bool,
+    addr: String,
+    expires: i64,
+    ttl: i64,
+    remaining: i64,
+    svg: String,
+}
+
+/// 配对未激活（{"ok": true, "active": false}）。
+#[derive(Serialize)]
+struct PairInactiveResp {
+    ok: bool,
+    active: bool,
+}
+
+/// 作废配对二维码的结果。
+#[derive(Serialize)]
+struct RevokeResp {
+    ok: bool,
+    revoked: bool,
+}
+
+/// 信任表状态（模式 + 已信任 + 待确认）。
+#[derive(Serialize)]
+struct TrustResp {
+    mode: String,
+    peers: Vec<TrustedPeer>,
+    pending: Vec<TrustEvent>,
+}
+
+/// 带提示消息的成功响应（{"ok": true, "message": "..."}）。
+#[derive(Serialize)]
+struct MessageResp {
+    ok: bool,
+    message: String,
+}
+
+/// 管理页设置（GET /api/settings）。配对码属敏感配置，不返回。
+#[derive(Serialize)]
+struct SettingsResp {
+    alias: String,
+    #[serde(rename = "autoAccept")]
+    auto_accept: bool,
+    #[serde(rename = "trustMode")]
+    trust_mode: String,
+    destination: PathBuf,
+    allow: Vec<PathBuf>,
+    #[serde(rename = "logDays")]
+    log_days: i64,
+}
+
 /// 写设置单独限流：管理页只监听局域网，避免被同网段反复刷配置。
 struct RateLimit {
     hits: Mutex<Vec<i64>>,
@@ -562,7 +670,7 @@ fn url_decode(s: &str) -> String {
 /// - 配了 browse_roots 就只列这些目录（NAS 上不该让管理页翻到系统目录）；
 /// - 没配时 Windows 列盘符（带卷标名），其它平台列 `/`。
 /// 只列目录不列文件：发送单个文件时直接手输路径，避免列表被成千上万个文件刷屏。
-fn list_dirs(path: &str, roots: &[PathBuf]) -> io::Result<serde_json::Value> {
+fn list_dirs(path: &str, roots: &[PathBuf]) -> io::Result<DirListResp> {
     let mut dirs: Vec<String> = Vec::new();
     // 路径 → 显示名。前端优先用它，盘符也能显示成「D: 仓库」
     let mut labels: HashMap<String, String> = HashMap::new();
@@ -626,7 +734,7 @@ fn list_dirs(path: &str, roots: &[PathBuf]) -> io::Result<serde_json::Value> {
     dirs.sort_by_key(|a| a.to_lowercase());
     // 上限只是防止一次返回几万条把页面卡死；正常目录远达不到
     dirs.truncate(500);
-    Ok(serde_json::json!({ "path": cur, "parent": parent, "dirs": dirs, "labels": labels }))
+    Ok(DirListResp { path: cur, parent, dirs, labels })
 }
 
 /// 判断 path 是否落在任意一个浏览根内。规范化后再比，避免 `..` 跳出白名单。
@@ -900,7 +1008,7 @@ fn route(
                 .clone();
             match list_dirs(&want, &roots) {
                 Ok(v) => json(&v),
-                Err(e) => json(&serde_json::json!({ "error": e.to_string() })),
+                Err(e) => json(&ErrorResp { error: e.to_string() }),
             }
         }
         // 最近一次发送任务；没有任务时返回 null（不是空对象），页面据此隐藏进度区
@@ -955,12 +1063,12 @@ fn route(
                         "info",
                         &format!("管理页发起发送 目标={to} 路径={path} 强制重传={force}"),
                     );
-                    json(&serde_json::json!({ "ok": true }))
+                    json(&OkResp { ok: true })
                 }
                 Err(e) => (
                     400,
                     "application/json",
-                    serde_json::to_vec(&serde_json::json!({ "ok": false, "error": e.to_string() }))
+                    serde_json::to_vec(&OkErrorResp { ok: false, error: e.to_string() })
                         .unwrap_or_else(|_| b"{\"ok\":false}".to_vec()),
                 ),
             }
@@ -994,11 +1102,11 @@ fn route(
                 }
             };
             if addr.is_empty() {
-                return json(&serde_json::json!({
-                    "ok": false,
-                    "active": false,
-                    "reason": "无法自动判断本机局域网地址，请在上方手填（例如 192.168.1.23:53318）"
-                }));
+                return json(&PairUnavailableResp {
+                    ok: false,
+                    active: false,
+                    reason: "无法自动判断本机局域网地址，请在上方手填（例如 192.168.1.23:53318）".to_string(),
+                });
             }
             let token = if method == "POST" {
                 match state.pair.issue() {
@@ -1008,7 +1116,7 @@ fn route(
                         return (
                             500,
                             "application/json",
-                            serde_json::to_vec(&serde_json::json!({ "ok": false, "reason": e.to_string() }))
+                            serde_json::to_vec(&PairFailResp { ok: false, reason: e.to_string() })
                                 .unwrap_or_else(|_| b"{}".to_vec()),
                         );
                     }
@@ -1034,34 +1142,34 @@ fn route(
                                     &format!("已生成配对二维码：{addr}，{} 秒内有效", t.ttl),
                                 );
                             }
-                            json(&serde_json::json!({
-                                "ok": true,
-                                "active": true,
-                                "addr": addr,
-                                "expires": t.expires,
-                                "ttl": t.ttl,
-                                "remaining": (t.expires - now_secs()).max(0),
-                                "svg": svg,
-                            }))
+                            json(&PairActiveResp {
+                                ok: true,
+                                active: true,
+                                addr,
+                                expires: t.expires,
+                                ttl: t.ttl,
+                                remaining: (t.expires - now_secs()).max(0),
+                                svg,
+                            })
                         }
                         Err(e) => {
                             state.log("error", &format!("渲染配对二维码失败: {e}"));
                             (
                                 500,
                                 "application/json",
-                                serde_json::to_vec(&serde_json::json!({ "ok": false, "reason": e.to_string() }))
+                                serde_json::to_vec(&PairFailResp { ok: false, reason: e.to_string() })
                                     .unwrap_or_else(|_| b"{}".to_vec()),
                             )
                         }
                     }
                 }
-                None => json(&serde_json::json!({ "ok": true, "active": false })),
+                None => json(&PairInactiveResp { ok: true, active: false }),
             }
         }
         ("POST", "/api/pair/revoke") => {
             let revoked = state.pair.revoke();
             state.log("info", "管理页作废了配对二维码");
-            json(&serde_json::json!({ "ok": true, "revoked": revoked }))
+            json(&RevokeResp { ok: true, revoked })
         }
         ("GET", "/api/trust") => {
             let mode = state.config.lock().expect("config poisoned").trust_mode.clone();
@@ -1074,7 +1182,7 @@ fn route(
                 }
             };
             let pending = state.trust.pending().unwrap_or_default();
-            json(&serde_json::json!({ "mode": mode, "peers": peers, "pending": pending }))
+            json(&TrustResp { mode, peers, pending })
         }
         ("POST", "/api/trust") => {
             if !limit.allow() {
@@ -1112,7 +1220,7 @@ fn route(
             match result {
                 Ok(message) => {
                     state.log("info", &format!("管理页信任操作: {message}"));
-                    json(&serde_json::json!({ "ok": true, "message": message }))
+                    json(&MessageResp { ok: true, message })
                 }
                 Err(e) => {
                     // 指纹格式错误、磁盘不可写都会走到这里，要把原因回给页面而不是只说失败
@@ -1120,7 +1228,7 @@ fn route(
                     (
                         400,
                         "application/json",
-                        serde_json::to_vec(&serde_json::json!({ "ok": false, "error": e.to_string() }))
+                        serde_json::to_vec(&OkErrorResp { ok: false, error: e.to_string() })
                             .unwrap_or_else(|_| b"{\"ok\":false}".to_vec()),
                     )
                 }
@@ -1133,14 +1241,14 @@ fn route(
         ("GET", "/api/settings") => {
             // 配对码属于敏感配置，管理页一律不返回
             let cfg = state.config.lock().expect("config poisoned");
-            json(&serde_json::json!({
-                "alias": cfg.alias,
-                "autoAccept": cfg.auto_accept,
-                "trustMode": cfg.trust_mode,
-                "destination": cfg.destination,
-                "allow": cfg.allow,
-                "logDays": cfg.log_days,
-            }))
+            json(&SettingsResp {
+                alias: cfg.alias.clone(),
+                auto_accept: cfg.auto_accept,
+                trust_mode: cfg.trust_mode.clone(),
+                destination: cfg.destination.clone(),
+                allow: cfg.allow.clone(),
+                log_days: cfg.log_days,
+            })
         }
         ("POST", "/api/settings") => {
             if !limit.allow() {
