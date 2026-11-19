@@ -662,6 +662,10 @@ public class TcController {
         ui.setDestDialogVisible(true);
     }
 
+    public void dismissDestDialog() {
+        ui.setDestDialogVisible(false);
+    }
+
     /** Compose 对话框回调：which=0 表示默认位置。 */
     public void applyDestination(int which) {
         ui.setDestDialogVisible(false);
@@ -774,6 +778,11 @@ public class TcController {
             list.add(new PeerEntry("", "", "发现结果解析失败：" + e.getMessage(), false));
             ui.setPeers(list);
         }
+    }
+
+    /** 强制重传开关：随清单一起告诉接收端「不要跳过已有文件」。 */
+    public void setForce(boolean value) {
+        ui.setForce(value);
     }
 
     public void pickSendFiles() {
@@ -908,6 +917,11 @@ public class TcController {
             String json = active ? st : TcNative.pairIssue(dir, saved, name);
             activity.runOnUiThread(() -> renderPairJson(json));
         }, "tc-pair").start();
+    }
+
+    /** 配对码 / 一次性令牌：界面输入，发送时随清单带给对端。 */
+    public void setPairCode(String code) {
+        ui.setPairCode(code == null ? "" : code);
     }
 
     public void savePairAddr(String addr) {
@@ -1312,6 +1326,11 @@ public class TcController {
         activity.getSharedPreferences(Dest.PREFS, Activity.MODE_PRIVATE)
                 .edit().putString("clip_port", p).apply();
         ui.setClipPort(p);
+    }
+
+    /** 端口输入框双向绑定用；真正落盘走 saveClipPort()。 */
+    public void setClipPort(String value) {
+        ui.setClipPort(value == null ? "" : value);
     }
 
     public void startClip() {
