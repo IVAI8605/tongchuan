@@ -34,7 +34,7 @@
 src/                 CLI 入口（tc 的可执行目标）
 crates/tc-core/      协议、TLS、传输、续传、信任库、历史、剪贴板、管理页
 crates/tc-jni/       Android 侧 JNI 绑定
-android/             Android 应用（Java + Gradle）
+android/             Android 应用（Kotlin + Compose + Gradle）
 configs/             配置模板与 systemd unit 模板
 scripts/             构建与验证脚本（verify.ps1、android/、windows/）
 tests/               集成测试（端到端、并发、信任门禁、剪贴板）
@@ -59,14 +59,13 @@ cargo build --release --workspace
 
 ### Android
 
-前置：JDK 17、Android SDK（`compileSdk 35`）、NDK、Gradle。
+前置：JDK 17、Android SDK（`compileSdk 35` / build-tools 36.0.0）、NDK 27.3、Gradle 8.11.1。
 
-```powershell
-# 交叉编译 Rust 内核并交给 Gradle 打包，输出 APK
-& pwsh -NoProfile -File scripts/android/build-apk.ps1
-```
+**NAS / Linux（当前实际构建方式，2026-11-19 起）**：见 [docs/README.md](./docs/README.md) 的「常用命令」——
+先交叉编译出 `libtc_jni.so` 拷进 `android/app/src/main/jniLibs/arm64-v8a/`，再用项目内可写缓存跑 Gradle。
+`scripts/android/build-apk.ps1` 是 Windows 历史脚本（找 `~/.gradle/wrapper` 下的 gradle.bat、默认 `--offline`、NDK 路径写死 windows），**在 NAS 上跑不通**，别用它。
 
-只用 `arm64-v8a`。Release 包复用调试签名，属于自用侧载定位。
+只用 `arm64-v8a`。Release 包复用调试签名，属于自用侧载定位；签名 key 的恢复流程见 [docs/README.md](./docs/README.md)。
 
 ### Windows 安装包
 

@@ -62,6 +62,12 @@ fun DevicesScreen(controller: TcController) {
                         }
                     )
                 }
+                // v0.17.1：被拒后的「待确认」只能靠刷新刷出来，必须有手动入口，
+                // 否则批准入口又藏起来了（迁移时漏掉，这里补回）。
+                OutlinedButton(
+                    onClick = { controller.refreshAll() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("刷新状态") }
             }
         }
 
@@ -205,6 +211,17 @@ private fun PairQrDialog(controller: TcController) {
         while (true) {
             now = System.currentTimeMillis() / 1000
             delay(1000)
+        }
+    }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val window = (context as? android.app.Activity)?.window
+        if (ui.pairKeepScreenOn) {
+            window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            // 对方正举着手机扫，别让屏幕黑掉；关窗立即清除，避免常亮耗电
+            window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
     val left = (ui.pairExpiresAt - now).coerceAtLeast(0)

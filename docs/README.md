@@ -28,20 +28,41 @@
 ## 常用命令
 
 ```bash
-# 先加载 NAS 工具 PATH
-source <工具目录>/env.sh
-cd <仓库根目录>
+# 每次先加载 NAS 工具 PATH（source 后 $AI_TOOL 可用）
+source "$AI_TOOL/env.sh"
+cd "$(dirname "$0")/.."   # 或直接 cd 到仓库根 src/
 
 cargo test --workspace
 pwsh -NoProfile -File scripts/verify.ps1
 
-# Android（NAS 侧）：共享 gradle 缓存本机不可初始化 native services，用项目内可写缓存 + PartZ 的只读依赖缓存
+# ---- Android（NAS 侧完整流程，2026-11-19 实测）----
+# 1) 交叉编译 Rust 内核（协议常量改动后必须重编，否则 .so 与 Java 侧不匹配）。
+#    .so 被 .gitignore 忽略，干净 clone 后这一步不可省，否则 APK 缺 native 库、一启动就崩。
+NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang" \
+CXX_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang++" \
+AR_aarch64_linux_android="$NDK_BIN/llvm-ar" \
+CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang" \
+CARGO_TARGET_DIR=/tmp/tongchuan-android-target \
+cargo build --release -p tc-jni --target aarch64-linux-android
+cp /tmp/tongchuan-android-target/aarch64-linux-android/release/libtc_jni.so \
+   android/app/src/main/jniLibs/arm64-v8a/
+
+# 2) Gradle 打包：共享 gradle 缓存本机无法初始化 native services，
+#    用项目内可写缓存 + PartZ 的只读依赖缓存（Compose/AGP/Kotlin 都在里面）；
+#    zxing core 3.5.3 只在本项目缓存里，首次构建需联网从 aliyun 补。
 cd android
 JAVA_TOOL_OPTIONS="-Duser.home=$PWD/cache/home" \
 GRADLE_USER_HOME=$PWD/cache/gradle-home \
-GRADLE_RO_DEP_CACHE=<PartZ>/cache/gradle-home/caches \
-gradle --no-daemon :app:assembleRelease
-gradle --no-daemon :app:testDebugUnitTest
+GRADLE_RO_DEP_CACHE="$(dirname "$PWD")/../PartZ/cache/gradle-home/caches" \
+gradle --no-daemon :app:assembleRelease :app:testDebugUnitTest
+
+# 3) 签名 key 恢复（换机或清了 android/cache/ 后必做）：
+#    release 复用 debug 签名，key 原件在 ~/.android/debug.keystore（不入库）。
+#    缺失时 Gradle 会静默生成新 key → 新包装不上已装机，只能卸载重装 → 用户数据丢失。
+mkdir -p cache/home/.android
+cp ~/.android/debug.keystore cache/home/.android/
+test -s cache/home/.android/debug.keystore || { echo "签名 key 缺失，停止构建"; exit 1; }
 
 # Windows 打包（在 Windows 侧跑）
 pwsh -NoProfile -File scripts/windows/make-installer.ps1

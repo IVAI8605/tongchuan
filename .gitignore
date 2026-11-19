@@ -42,6 +42,8 @@ tongchuan-target/
 /android/app/src/main/jniLibs/**/*.so
 # 2026-11-19 UI 重构：可写 Gradle 缓存（共享 _tool/gradle-cache 本机不可初始化 native services）
 /android/cache/
+# Kotlin 编译器会话缓存（之前只被 *.log 规则意外盖住，显式忽略）
+/android/.kotlin/
 *.apk
 *.aab
 

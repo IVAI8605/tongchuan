@@ -448,9 +448,18 @@ impl PartFile {
             let aside = unique_path(final_path);
             fs::rename(final_path, &aside)?;
             if let Err(e) = fs::rename(&self.path, final_path) {
-                // 回滚：旧文件改回原名。改不回去也不能再覆盖一次，只能把错误往上抛
-                let _ = fs::rename(&aside, final_path);
-                return Err(e);
+                // 回滚也失败时不能静默：旧文件现在停在 aside 路径，用户会以为原文件没了。
+                // 文件都还在盘上（可恢复），但必须把 aside 的位置报出去，让用户能找回。
+                let rollback = fs::rename(&aside, final_path);
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!(
+                        "put new file at {}: {e}; old file kept at {} (rollback: {:?})",
+                        final_path.display(),
+                        aside.display(),
+                        rollback.err()
+                    ),
+                ));
             }
         } else {
             fs::rename(&self.path, final_path)?;

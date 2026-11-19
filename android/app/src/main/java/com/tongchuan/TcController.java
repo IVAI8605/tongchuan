@@ -875,6 +875,10 @@ public class TcController {
             startRecv();
         }
         ui.setPairDialogVisible(true);
+        ui.setPairKeepScreenOn(true);
+        // 打开即出码：沿用仍有效的一张，没有就新发一张。
+        // 之前只设可见、没调这里，弹窗打开只会显示「已过期」，得手动点「重新生成」。
+        issuePairCode();
     }
 
     /** 对话框内「重新生成」。 */
@@ -897,6 +901,7 @@ public class TcController {
 
     public void dismissPairDialog() {
         ui.setPairDialogVisible(false);
+        ui.setPairKeepScreenOn(false);
     }
 
     /** 打开对话框与「重新生成」共用：先查有效码，没有就新发一张。 */
@@ -921,7 +926,9 @@ public class TcController {
 
     /** 配对码 / 一次性令牌：界面输入，发送时随清单带给对端。 */
     public void setPairCode(String code) {
-        ui.setPairCode(code == null ? "" : code);
+        // 手输时容易带前后空格；旧版是在读取时 trim()，这里在写入时就去掉，
+        // 免得落点查询和发送拿到脏令牌、提示只说「配对码不对」难以定位。
+        ui.setPairCode(code == null ? "" : code.trim());
     }
 
     public void savePairAddr(String addr) {
@@ -1027,6 +1034,7 @@ public class TcController {
         sendAborted = false;
         SendService.paused = false;
         ui.setSendPaused(false);
+        ui.setSendCancelling(false);
         ui.setSendRunning(true);
         ui.setSendProgress(0);
         ui.setSendIndeterminate(true);
@@ -1151,6 +1159,7 @@ public class TcController {
                 ui.setSendProgressText(summary);
                 ui.setSendRunning(false);
                 ui.setSendPaused(false);
+                ui.setSendCancelling(false);
                 sendPaused = false;
                 SendService.paused = false;
                 refreshSendHistory();
@@ -1160,7 +1169,7 @@ public class TcController {
 
     /** 暂停 / 继续当前发送：状态只在块边界生效，点完立刻改状态，不让用户以为没反应。 */
     public void togglePauseSend() {
-        if (!SendService.isRunning()) {
+        if (!SendService.isRunning() || sendAborted) {
             return;
         }
         sendPaused = !sendPaused;
@@ -1184,6 +1193,7 @@ public class TcController {
         sendPaused = false;
         SendService.paused = false;
         ui.setSendPaused(false);
+        ui.setSendCancelling(true);
         TcNative.sendCancel();
         ui.setSendProgressText("正在取消…");
     }
@@ -1674,6 +1684,9 @@ public class TcController {
         ui.setKeepAliveEnabled(KeepAliveService.isEnabled(activity));
         ui.setHasAllFilesAccess(Dest.hasAllFilesAccess());
         ui.setReceiveDirText(receiveDirText());
+        // v0.17.1：状态刷新必须联动信任列表，否则被拒后的「待确认」要退出重进才出现。
+        // 迁移到 Compose 时漏了这条，这里补回。
+        refreshTrust();
     }
 
     /**

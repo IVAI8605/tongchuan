@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -48,6 +49,7 @@ fun SendScreen(controller: TcController) {
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier
                         .fillMaxWidth()
+                        .heightIn(min = 48.dp)
                         .clickable { controller.discoverPeersAsync() },
                 )
                 Text(
@@ -72,6 +74,7 @@ fun SendScreen(controller: TcController) {
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier
                         .fillMaxWidth()
+                        .heightIn(min = 48.dp)
                         .clickable { controller.chooseDestination() },
                 )
             }
@@ -130,9 +133,13 @@ fun SendScreen(controller: TcController) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { controller.togglePauseSend() },
-                            modifier = Modifier.weight(1f)) {
-                            Text(if (ui.sendPaused) "继续" else "暂停")
+                        // 确认取消后到会话真正结束之间不能再暂停：
+                        // 原 View 版确认取消时会把暂停按钮 GONE，这里等价隐藏。
+                        if (!ui.sendCancelling) {
+                            OutlinedButton(onClick = { controller.togglePauseSend() },
+                                modifier = Modifier.weight(1f)) {
+                                Text(if (ui.sendPaused) "继续" else "暂停")
+                            }
                         }
                         OutlinedButton(onClick = { controller.cancelSend() },
                             modifier = Modifier.weight(1f)) { Text("取消") }

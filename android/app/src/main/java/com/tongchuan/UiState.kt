@@ -58,6 +58,8 @@ class UiState {
     var sendProgressText by mutableStateOf("")
     var sendRunning by mutableStateOf(false)
     var sendPaused by mutableStateOf(false)
+    /** 用户已确认取消、会话尚未真正结束：此时暂停按钮不能再点（原 View 版会直接 GONE）。 */
+    var sendCancelling by mutableStateOf(false)
     var cancelConfirmVisible by mutableStateOf(false)
     var history by mutableStateOf(listOf<HistoryItem>())
 
@@ -71,6 +73,8 @@ class UiState {
 
     // 配对二维码对话框
     var pairDialogVisible by mutableStateOf(false)
+    /** 对话框展示期间保持屏幕常亮（对方正举着扫），关闭即清除。 */
+    var pairKeepScreenOn by mutableStateOf(false)
     var pairQr by mutableStateOf<Bitmap?>(null)
     var pairInfo by mutableStateOf("")
     var pairExpiresAt by mutableStateOf(0L)

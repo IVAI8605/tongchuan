@@ -107,6 +107,14 @@ class ScanActivity : ComponentActivity() {
     @Volatile private var done = false
     private var cameraId: String? = null
 
+    /**
+     * 相机代次：每次 closeCamera 递增。openCamera 的异步回调里若代次已变，
+     * 说明这次打开已被暂停/销毁取消，回调拿到的设备必须立刻关掉。
+     * 原 Java 版没这个校验：onPause 关掉相机后，迟到的 onOpened 又把已关闭的 dev
+     * 赋回 camera，之后 openCamera 永久早退，画面再也起不来（黑屏）。
+     */
+    private var cameraGeneration = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -129,7 +137,12 @@ class ScanActivity : ComponentActivity() {
 
             override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
 
-            override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean = true
+            override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                // Compose 离开组合/切后台会先释放 surface，相机不能继续持有它，
+                // 否则 reader 还挂在已释放的 Surface 上，解码停摆且句柄泄漏。
+                closeCamera()
+                return true
+            }
 
             override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
         }
@@ -215,27 +228,39 @@ class ScanActivity : ComponentActivity() {
                 hint.value = "这台设备没有可用的后置相机"
                 return
             }
-            cm.openCamera(id, deviceCallback, bg)
+            val gen = cameraGeneration
+            cm.openCamera(id, deviceCallback(gen), bg)
         } catch (e: Exception) {
             hint.value = "打不开相机：" + e.message
         }
     }
 
-    private val deviceCallback = object : CameraDevice.StateCallback() {
+    /** 每次打开捕获当前代次；回调到达时若代次已变，这次打开就是过期的，直接关掉设备。 */
+    private fun deviceCallback(gen: Int) = object : CameraDevice.StateCallback() {
         override fun onOpened(dev: CameraDevice) {
+            if (gen != cameraGeneration || done) {
+                dev.close()
+                return
+            }
             camera = dev
             startSession()
         }
 
         override fun onDisconnected(dev: CameraDevice) {
             dev.close()
-            camera = null
+            if (camera === dev) {
+                camera = null
+            }
         }
 
         override fun onError(dev: CameraDevice, error: Int) {
             dev.close()
-            camera = null
-            runOnUiThread { hint.value = "相机出错（$error），请返回重试" }
+            if (camera === dev) {
+                camera = null
+            }
+            if (gen == cameraGeneration) {
+                runOnUiThread { hint.value = "相机出错（$error），请返回重试" }
+            }
         }
     }
 
@@ -488,6 +513,8 @@ class ScanActivity : ComponentActivity() {
     }
 
     private fun closeCamera() {
+        // 先作废在途的 onOpened 回调，否则它会在关闭之后把设备塞回 camera
+        cameraGeneration += 1
         try {
             session?.close()
         } catch (e: Exception) {
