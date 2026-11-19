@@ -8,8 +8,8 @@
 局域网文件夹互传工具：电脑、手机、NAS 之间走文件通道传目录，不走云端。
 源码在本仓库根目录，Linux 运行二进制在项目上一级（NAS 部署位）。
 
-当前版本：`0.20.1`（唯一来源 `Cargo.toml` 的 `workspace.package.version`）。
-协议：`0.20`；主次版本相同的 0.20.x 可互通。Android 当前 `0.20.1`，Windows `tc.exe` 仍为 `0.20.0`，可接。
+当前版本：`1.0.0`（唯一来源 `Cargo.toml` 的 `workspace.package.version`）。
+协议：`0.20`，已与包版本解耦（`tc-core` 里固定为 `0.20`）；Android `1.0.0` 与 0.20.x 的电脑 / NAS 互通，无需同步升级。Windows `tc.exe` 仍为 `0.20.0`，可接。
 
 ## 目录
 
@@ -21,7 +21,7 @@
 | `scripts/windows/` | Windows 托盘、右键菜单、隐藏发送、截屏剪贴板桥 |
 | `configs/` | 配置模板；本机 `config.toml` 不入库 |
 | `tests/windows/` | PowerShell 回归测试 |
-| `../dist/通传-0.20.1.apk` | 最近的 Android 交付包（本地产物，不提交） |
+| `../dist/通传-1.0.0.apk` | 最近的 Android 交付包（本地产物，不提交） |
 
 运行数据在项目根的 `identity/`、`logs/`、`queue/`、`received/`，含设备私钥，不入库、不重构。
 
@@ -35,8 +35,13 @@ cd <仓库根目录>
 cargo test --workspace
 pwsh -NoProfile -File scripts/verify.ps1
 
-# Android
-gradle --offline --no-daemon -p android assembleRelease
+# Android（NAS 侧）：共享 gradle 缓存本机不可初始化 native services，用项目内可写缓存 + PartZ 的只读依赖缓存
+cd android
+JAVA_TOOL_OPTIONS="-Duser.home=$PWD/cache/home" \
+GRADLE_USER_HOME=$PWD/cache/gradle-home \
+GRADLE_RO_DEP_CACHE=<PartZ>/cache/gradle-home/caches \
+gradle --no-daemon :app:assembleRelease
+gradle --no-daemon :app:testDebugUnitTest
 
 # Windows 打包（在 Windows 侧跑）
 pwsh -NoProfile -File scripts/windows/make-installer.ps1

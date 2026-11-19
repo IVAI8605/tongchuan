@@ -2,7 +2,7 @@
 
 局域网内的文件夹互传工具。手机、电脑、NAS 在同一网段时，直接用一条命令或点几下屏幕，把整个目录（保留相对路径与空目录）传到另一端；不经过任何云端或中继。
 
-当前版本：`0.20.1`（版本号唯一来源是根目录 [Cargo.toml](./Cargo.toml) 的 `workspace.package.version`）。文档索引见 [docs/README.md](./docs/README.md)。
+当前版本：`1.0.0`（版本号唯一来源是根目录 [Cargo.toml](./Cargo.toml) 的 `workspace.package.version`）。协议版本与包版本解耦，当前协议 `0.20`，与 0.20.x 各端互通。文档索引见 [docs/README.md](./docs/README.md)。
 
 ## 能做什么
 

@@ -20,9 +20,13 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// 本机协议版本，唯一来源是 workspace 的包版本。
-/// P2 起 Hello / HelloAck 都带它，两端不同版本时给出「需要升级」的明确提示。
-pub const PROTOCOL_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// 协议版本。
+///
+/// 2026-11-19 起与包版本解耦：包版本按产品节奏走（安卓 UI 重构升到 1.0.0），
+/// 协议版本只在传输协议真的变化时才动。当前协议仍是 0.20，
+/// 与 0.20.x 的电脑 / NAS / 旧安卓端互通（用户 2026-11-19 明确要求「协议不动」）。
+/// 发现公告里的「设备版本」仍用包版本（见 tc-jni），那只是展示，不参与兼容判定。
+pub const PROTOCOL_VERSION: &str = "0.20";
 
 /// 版本兼容口径：主次版本相同即可互通，补丁号不同视为兼容。
 /// 0.x 阶段小版本就代表协议变更，所以不能只看主版本。

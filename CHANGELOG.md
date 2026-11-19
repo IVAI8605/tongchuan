@@ -3,6 +3,17 @@
 > 面向使用者的变更记录。时间用 24 小时制、精确到分钟，同一版本只保留一条。
 > 早期开发历史与逐次验证台账保留在私有归档仓库，本文件只保留结论性内容。
 
+## v1.0.0 — 2026-11-19 13:30
+
+> 安卓端 UI 重构：界面从 Java + View 体系整体换成 Kotlin + Jetpack Compose + Material 3。传输协议不变，仍与 0.20.x 各端互通。
+
+- 重构（安卓）：主界面改为四页底部导航（发送 / 设备 / 剪贴板 / 接收），颜色、字号、形状全部走 `ui/theme/` 令牌（墨绿 seed `#1F6F5C`，深浅两套 `ColorScheme`）；原 `MainActivity.java` 的业务逻辑原样搬进 `TcController.java`，UI 状态经 `UiState`（Compose 快照状态）暴露给 Compose。
+- 重构（安卓）：扫码页保留 Camera2 预览与 zxing 解码内核，界面外壳改 Compose（预览用 `AndroidView` 包 `TextureView`）。
+- 兼容：包版本升到 `1.0.0`，**协议版本与包版本解耦**，固定为 `0.20`；电脑 / NAS / 旧安卓端继续互通，无需同步升级。发现公告里的设备版本仍用包版本，只作展示。
+- 新增（安卓）：`gradle :app:testDebugUnitTest` 纯函数回归（字节单位换算、失败原因文案），8 条全过。
+- 验证：`cargo test --workspace` 全绿；Android `assembleDebug` / `assembleRelease` 通过（versionCode 10000 / versionName 1.0.0）；真机 V2551A 装 v1.0.0 后四页与扫码页渲染正常，自动化探针 `list` 有输出、UI「开始发送」入口按预期提示先选文件。
+- 限制：真机端到端发送未验证——NAS 上运行的守护进程仍是 0.19.0，与 0.20 协议不互通（状态卡待办：需 sudo 重启）。
+
 ## v0.20.1 — 2026-11-17 04:55
 
 > 手机截屏自动进电脑剪贴板：手机新截图自动发到已选电脑，电脑收到后直接把图片放进剪贴板，Ctrl+V 即可。文件通道/协议不变，0.20.x 三端兼容。
