@@ -1,5 +1,7 @@
 plugins {
-    id("com.android.application")
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
 }
 
 // 版本号唯一来源是根目录 Cargo.toml 的 workspace.package.version。
@@ -43,6 +45,9 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    // 2026-11-19 UI 重构：界面层从 View 体系改为 Jetpack Compose，新代码一律走 Compose
+    buildFeatures { compose = true }
+
     lint {
         // 自用工具，不做上架检查；只关心能不能装、能不能跑
         abortOnError = false
@@ -51,8 +56,27 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
 dependencies {
     // v0.20 二维码：只解码/编码，不带动整套相机 UI，预览由 ScanActivity 用 Camera2 自己做。
     // 选 zxing core 而不是 zxing-android-embedded：后者会额外带一套 Activity 与资源。
     implementation("com.google.zxing:core:3.5.3")
+
+    // 2026-11-19 UI 重构：Compose + Material 3（版本由 BOM 统一）
+    implementation(platform(libs.compose.bom))
+    implementation(libs.compose.ui)
+    implementation(libs.compose.ui.graphics)
+    implementation(libs.compose.ui.tooling.preview)
+    implementation(libs.compose.material3)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.core.ktx)
+    debugImplementation(libs.compose.ui.tooling)
+
+    testImplementation(libs.junit)
 }

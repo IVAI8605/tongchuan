@@ -40,6 +40,8 @@ tongchuan-target/
 /android/local.properties
 # 由 scripts/android/build-android.ps1 从 Rust 产物拷入，不是手写源码
 /android/app/src/main/jniLibs/**/*.so
+# 2026-11-19 UI 重构：可写 Gradle 缓存（共享 _tool/gradle-cache 本机不可初始化 native services）
+/android/cache/
 *.apk
 *.aab
 
