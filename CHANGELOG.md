@@ -11,8 +11,9 @@
 - 重构（安卓）：扫码页保留 Camera2 预览与 zxing 解码内核，界面外壳改 Compose（预览用 `AndroidView` 包 `TextureView`）。
 - 兼容：包版本升到 `1.0.0`，**协议版本与包版本解耦**，固定为 `0.20`；电脑 / NAS / 旧安卓端继续互通，无需同步升级。发现公告里的设备版本仍用包版本，只作展示。
 - 新增（安卓）：`gradle :app:testDebugUnitTest` 纯函数回归（字节单位换算、失败原因文案），8 条全过。
-- 验证：`cargo test --workspace` 全绿；Android `assembleDebug` / `assembleRelease` 通过（versionCode 10000 / versionName 1.0.0）；真机 V2551A 装 v1.0.0 后四页与扫码页渲染正常，自动化探针 `list` 有输出、UI「开始发送」入口按预期提示先选文件。
-- 限制：真机端到端发送未验证——NAS 上运行的守护进程仍是 0.19.0，与 0.20 协议不互通（状态卡待办：需 sudo 重启）。
+- 验证：`cargo test --workspace` 全绿；Android `assembleDebug` / `assembleRelease` 通过（versionCode 10000 / versionName 1.0.0）；单测 8 条全过。
+- 实测（2026-11-19 13:38）：真机 V2551A 装 v1.0.0，四页与扫码页渲染正常；UI 全点选发送 `b.txt`（16 B）到 NAS 成功，落盘 `/vol2/1000/好3T/通传测试-20261115/接收/已选文件/b.txt`，daemon 日志 `verified=true 来源=V2551A`——**1.0.0 手机与 0.20.0 NAS 互通**。
+- 说明：`maybeRunProbe` 的 `send` 在 Android 12+ 前台服务启动限制下会被拒（探针自身缺陷，界面发送不受影响），建议后续删除该探针。
 
 ## v0.20.1 — 2026-11-17 04:55
 
