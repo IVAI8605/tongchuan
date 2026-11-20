@@ -12,7 +12,7 @@
 - 兼容：包版本升到 `1.0.0`，**协议版本与包版本解耦**，固定为 `0.20`；电脑 / NAS / 旧安卓端继续互通，无需同步升级。发现公告里的设备版本仍用包版本，只作展示。
 - 新增（安卓）：`gradle :app:testDebugUnitTest` 纯函数回归（字节单位换算、失败原因文案），8 条全过。
 - 验证：`cargo test --workspace` 全绿；Android `assembleDebug` / `assembleRelease` 通过（versionCode 10000 / versionName 1.0.0）；单测 8 条全过。
-- 实测（2026-11-19 13:38）：真机 V2551A 装 v1.0.0，四页与扫码页渲染正常；UI 全点选发送 `b.txt`（16 B）到 NAS 成功，落盘 `/vol2/1000/好3T/通传测试-20261115/接收/已选文件/b.txt`，daemon 日志 `verified=true 来源=V2551A`——**1.0.0 手机与 0.20.0 NAS 互通**。
+- 实测（2026-11-19 13:38）：真机 V2551A 装 v1.0.0，四页与扫码页渲染正常；UI 全点选发送 `b.txt`（16 B）到 NAS 成功，落盘接收目录下的 `已选文件/b.txt`，daemon 日志 `verified=true 来源=V2551A`——**1.0.0 手机与 0.20.0 NAS 互通**。
 - 说明：`maybeRunProbe` 的 `send` 在 Android 12+ 前台服务启动限制下会被拒（探针自身缺陷，界面发送不受影响），建议后续删除该探针。
 
 ## v0.20.1 — 2026-11-17 04:55
@@ -39,7 +39,7 @@
 - 修复（Windows 安装器防火墙）：安装器提权级别由 `user` 改为 `admin`，`install.ps1` 改按**程序路径**建入站规则（Domain/Private 全放行，Public 限本地子网），并在建规则前清理与本安装路径关联的、由弹窗生成且动作是 Block 的 `Query User{...}` 规则（系统里显式 Block 优先于 Allow）；失败写 `安装目录\install-firewall.log`，卸载同步按新规则名删除。此前安装器不提权，`IsInRole(Administrator)` 恒为假，防火墙段从未生效——每次更新都可能被系统重新询问，且公用网络留下了 Block 规则。
 - 测试：`cargo test --workspace` 134 项全绿；新增 13 项（令牌一次性/过期/限速/重新生成/关闭不撤销、payload 编解码与非法输入、门禁放行/错码/重复使用、管理页出码与作废接口、页面区块存在性）。
 - 门禁：`scripts/verify.ps1` 8/8 PASS。
-- 产物（只留本地）：Windows zip / setup、Android arm64 APK、Linux x64 均在 `_外置\备份\release-v0.20.0-资产临时\`，各附 SHA256；未 push、未建 Release。
+- 产物（只留本地）：Windows zip / setup、Android arm64 APK、Linux x64 均在 项目外的本地产物归档目录，各附 SHA256；未 push、未建 Release。
 - 实测（真机，手机 V2551A）：出码与倒计时正常、立即作废后二维码消失、重新生成后倒计时重置；PC 以二维码令牌首发 `verdict=OK`，同设备第二次不带令牌发送仍 `verdict=OK`；作废后用同一令牌从新身份发送被拒（`untrusted`）。扫码页相机权限流程与出流已确认，双机对拍（扫码识别）待补测。
 
 ## v0.19.0 — 2026-11-15 16:26
@@ -53,7 +53,7 @@
 - 兼容：不改协议字段。0.18 端会被版本门禁拒绝，需三端同版 0.19.0。
 - 测试：`cargo test --workspace` 121 项全绿；新增 10 项（mtime 写回、小文件残留清理与删除边界、缓存命中/失效/坏行）。
 - 门禁：`scripts/verify.ps1` 8/8 PASS（`cache\通传-验证\20261115-162231\`）。
-- 产物（只留本地）：Windows zip / setup、Android arm64 APK、Linux x64 均在 `_外置\备份\release-v0.19.0-资产临时\`，各附 SHA256；未 push、未建 Release。
+- 产物（只留本地）：Windows zip / setup、Android arm64 APK、Linux x64 均在 项目外的本地产物归档目录，各附 SHA256；未 push、未建 Release。
 - 已知限制（2026-11-15 真机验证发现）：systemd `ProtectSystem=strict` 下，`hash-cache.jsonl` 所在目录必须在 `ReadWritePaths` 内，否则缓存文件建不出来、开关看似打开却不生效（服务与其他功能不受影响）。NAS 单元默认只放行了子目录，使用前需把该文件路径加进白名单。
 
 ## v0.18.0 — 2026-11-15 16:05
