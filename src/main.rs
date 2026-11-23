@@ -3,7 +3,6 @@ use std::env;
 use std::io;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -916,33 +915,6 @@ fn run(args: &[String]) -> io::Result<()> {
                     cfg.destination.display()
                 ),
             );
-            // v0.6 剪贴板中继：配置了 clip_listen 才起，缺省关闭（剪贴板里可能有密码）。
-            // 与文件接收共用同一份身份与信任表，撤销立即生效；端口独立，不受文件会话并发数影响。
-            if !cfg.clip_listen.trim().is_empty() {
-                match TcpListener::bind(cfg.clip_listen.trim()) {
-                    Ok(l) => {
-                        let srv = tc_core::clip::ClipServer::new(
-                            cfg.identity_dir.join("clip-history.jsonl"),
-                            Some(Arc::clone(&state.trust)),
-                        );
-                        srv.warm_up(64);
-                        let acc: Arc<dyn tc_core::transport::Accepter> = Arc::new(TlsAccepter {
-                            listener: l,
-                            config: server_config(&id)?,
-                        });
-                        let st2 = state.clone();
-                        let addr = cfg.clip_listen.clone();
-                        thread::spawn(move || {
-                            st2.log("info", &format!("剪贴板中继已启动 {addr}"));
-                            let stop = Arc::new(AtomicBool::new(false));
-                            if let Err(e) = srv.serve(acc, stop) {
-                                st2.log("error", &format!("剪贴板中继退出: {e}"));
-                            }
-                        });
-                    }
-                    Err(e) => state.log("error", &format!("剪贴板中继监听失败: {e}")),
-                }
-            }
             // 只记录令牌文件位置，不记录令牌本身，避免日志泄露凭据
             state.log(
                 "info",
@@ -1208,10 +1180,6 @@ fn run(args: &[String]) -> io::Result<()> {
             trust_cmd(args)?;
             Ok(())
         }
-        "clip" => {
-            clip_cmd(args)?;
-            Ok(())
-        }
         _ => {
             println!("usage:");
             println!("  tc version");
@@ -1227,203 +1195,9 @@ fn run(args: &[String]) -> io::Result<()> {
             println!("  tc queue --dir DIR [--window MIN]");
             println!("  tc flush --dir DIR [--window MIN] [--history-dir DIR]");
             println!("  tc trust list|pending|approve FP|revoke FP|rename FP --alias NAME [--identity DIR | --config FILE]");
-            println!("  tc clip serve --listen IP:PORT [--identity DIR] [--history FILE] [--open]");
-            println!("  tc clip push --to IP:PORT (--text TEXT | --stdin) [--peer-fp HEX] [--identity DIR] [--sensitive]");
-            println!("  tc clip status --to IP:PORT [--peer-fp HEX] [--identity DIR]");
-            println!("  tc clip watch --to IP:PORT [--peer-fp HEX] [--identity DIR] [--apply] [--interval MS]");
-            println!("  tc clip pause --minutes N | tc clip resume | tc clip history [--limit N]");
             Ok(())
         }
     }
-}
-
-/// 剪贴板内核的命令入口。子命令与 `功能展望-版本路线.md` §3 一一对应：
-/// serve（星型主设备）、push（推一条）、watch（订阅并可选写回剪贴板）、status、pause/resume。
-fn clip_cmd(args: &[String]) -> io::Result<()> {
-    let sub = args.get(1).map(|s| s.as_str()).unwrap_or("");
-    match sub {
-        "serve" => {
-            let listen = opt(args, "--listen")
-                .unwrap_or_else(|| format!("0.0.0.0:{}", tc_core::clip::DEFAULT_CLIP_PORT));
-            let (dir, id) = send_identity(args)?;
-            let history = opt(args, "--history")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| dir.join("clip-history.jsonl"));
-            let listener = TcpListener::bind(&listen)?;
-            // --open 只用于本机回环与自动化：此时既不开 TLS 也不查信任表，
-            // 否则明文客户端会把 TLS 握手字节当成帧长度，报「message too large」。
-            let open = args.iter().any(|a| a == "--open");
-            let trust = if open {
-                None
-            } else {
-                Some(Arc::new(TrustStore::new(&dir)))
-            };
-            let server = tc_core::clip::ClipServer::new(history.clone(), trust);
-            server.warm_up(64);
-            let acc: Arc<dyn tc_core::transport::Accepter> = if open {
-                Arc::new(PlainAccepter { listener })
-            } else {
-                Arc::new(TlsAccepter {
-                    listener,
-                    config: server_config(&id)?,
-                })
-            };
-            println!(
-                "CLIP serve listen={} history={} trust={}",
-                listen,
-                history.display(),
-                if open { "open" } else { "closed" }
-            );
-            let stop = Arc::new(AtomicBool::new(false));
-            server.serve(acc, stop)
-        }
-        "push" => {
-            let to = opt(args, "--to")
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "缺少 --to"))?;
-            let (_, id) = send_identity(args)?;
-            let opener = make_opener(&to, opt(args, "--peer-fp").as_deref(), Some(&id))?;
-            let text = match opt(args, "--text") {
-                Some(t) => t,
-                None => {
-                    let mut s = String::new();
-                    io::Read::read_to_string(&mut io::stdin(), &mut s)?;
-                    s
-                }
-            };
-            if text.is_empty() {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "内容为空"));
-            }
-            let ev = tc_core::clip::push_once(
-                opener.as_ref(),
-                local_device(),
-                &origin_of(args),
-                &text,
-                args.iter().any(|a| a == "--sensitive"),
-            )?;
-            println!(
-                "CLIP push id={} size={} hash={}",
-                ev.id,
-                ev.size,
-                &ev.hash[..16.min(ev.hash.len())]
-            );
-            Ok(())
-        }
-        "status" => {
-            let to = opt(args, "--to")
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "缺少 --to"))?;
-            let (_, id) = send_identity(args)?;
-            let opener = make_opener(&to, opt(args, "--peer-fp").as_deref(), Some(&id))?;
-            let mut conn =
-                tc_core::clip::ClipClient::connect(opener.as_ref(), local_device(), &origin_of(args))?;
-            conn.send(&tc_core::clip::ClipMsg::Status)?;
-            match conn.recv()? {
-                tc_core::clip::ClipMsg::StatusReply {
-                    clients,
-                    lamport,
-                    latest,
-                } => {
-                    let desc = latest
-                        .map(|e| format!("{} {} size={}", e.id, e.preview, e.size))
-                        .unwrap_or_else(|| "-".into());
-                    println!("CLIP status clients={clients} lamport={lamport} latest={desc}");
-                    Ok(())
-                }
-                tc_core::clip::ClipMsg::Deny { reason } => Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    reason,
-                )),
-                other => Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("unexpected status reply: {other:?}"),
-                )),
-            }
-        }
-        "watch" => {
-            let to = opt(args, "--to")
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "缺少 --to"))?;
-            let (_, id) = send_identity(args)?;
-            let opener = make_opener(&to, opt(args, "--peer-fp").as_deref(), Some(&id))?;
-            let origin = origin_of(args);
-            let apply = args.iter().any(|a| a == "--apply");
-            let interval = opt(args, "--interval")
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(700);
-            let pause_path = tc_core::clip::default_pause_path();
-            let mut conn =
-                tc_core::clip::ClipClient::connect(opener.as_ref(), local_device(), &origin)?;
-            println!("CLIP watch origin={origin} apply={apply} loop=1");
-            let mut since = 0u64;
-            loop {
-                if let Some(until) = tc_core::clip::paused_until(&pause_path) {
-                    // 暂停期间不取事件，但保持连接：恢复后按 lamport 继续
-                    println!("CLIP paused until {until}");
-                    thread::sleep(Duration::from_millis(interval.max(1000)));
-                    continue;
-                }
-                let (ev, text, lamport) = tc_core::clip::pull(&mut conn, since)?;
-                if let Some(ev) = ev {
-                    since = since.max(ev.lamport);
-                    println!(
-                        "CLIP event id={} from={} size={} sensitive={} preview={}",
-                        ev.id, ev.origin, ev.size, ev.sensitive, ev.preview
-                    );
-                    if let Some(t) = text {
-                        // 自己发的、带敏感标记的一律不自动写回，避免把密码贴到别人剪贴板
-                        if apply && !ev.sensitive && ev.origin != origin {
-                            if let Err(e) = tc_core::clip::apply_to_clipboard(&t) {
-                                eprintln!("CLIP apply failed: {e}");
-                            }
-                        }
-                    }
-                } else if lamport > since {
-                    since = lamport;
-                }
-                thread::sleep(Duration::from_millis(interval));
-            }
-        }
-        "pause" => {
-            let minutes = opt(args, "--minutes")
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(15);
-            let path = tc_core::clip::default_pause_path();
-            let until = tc_core::clip::set_pause(&path, minutes)?;
-            println!("CLIP pause until={until} file={}", path.display());
-            Ok(())
-        }
-        "resume" => {
-            let path = tc_core::clip::default_pause_path();
-            tc_core::clip::clear_pause(&path)?;
-            println!("CLIP resume file={}", path.display());
-            Ok(())
-        }
-        "history" => {
-            let (dir, _) = send_identity(args)?;
-            let file = opt(args, "--history")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| dir.join("clip-history.jsonl"));
-            let limit = opt(args, "--limit")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(10);
-            let events = tc_core::clip::read_history(&file, limit)?;
-            println!("CLIP history count={} file={}", events.len(), file.display());
-            for e in events {
-                println!(
-                    "  {} {} lamport={} size={} sensitive={} {}",
-                    e.id, e.origin, e.lamport, e.size, e.sensitive, e.preview
-                );
-            }
-            Ok(())
-        }
-        _ => {
-            println!("usage: tc clip serve|push|status|watch|pause|resume|history ...");
-            Ok(())
-        }
-    }
-}
-
-/// 本机在剪贴板事件里的名字：默认用设备名，可用 --origin 覆盖（同一台机器跑两个日志用）。
-fn origin_of(args: &[String]) -> String {
-    opt(args, "--origin").unwrap_or_else(|| local_device().name)
 }
 
 #[cfg(test)]

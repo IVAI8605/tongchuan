@@ -81,8 +81,6 @@ class UiState {
     var pairAddr by mutableStateOf("")
 
     // 剪贴板页
-    var clipText by mutableStateOf("")
-    var clipPort by mutableStateOf("53320")
 
     // 接收页
     var recent by mutableStateOf(listOf<RecentItem>())
@@ -95,5 +93,7 @@ class UiState {
 
     // 其他
     var force by mutableStateOf(false)
+    /** v1.2.0：设置页「安全」总开关，默认关；开启后才显示发现与信任/配对的管理入口。 */
+    var securityEnabled by mutableStateOf(false)
     var versionName by mutableStateOf("")
 }

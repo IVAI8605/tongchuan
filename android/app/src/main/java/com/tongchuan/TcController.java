@@ -54,13 +54,6 @@ public class TcController {
     private final Activity activity;
     private final UiState ui = new UiState();
     private final Handler uiTick = new Handler(Looper.getMainLooper());
-    private final Runnable clipTick = new Runnable() {
-        @Override
-        public void run() {
-            refreshClip();
-            uiTick.postDelayed(this, 2000);
-        }
-    };
     /** v1.1.0：接收页实时进度，接收期间每 1 秒刷一次；只在前台跑，进后台就停，省电。 */
     private final Runnable recvTick = new Runnable() {
         @Override
@@ -105,7 +98,8 @@ public class TcController {
 
     public void onCreate(Intent intent) {
         ui.setVersionName(versionName());
-        ui.setClipPort(pref("clip_port", "53320"));
+        // v1.2.0：安全总开关默认关，读持久化值
+        ui.setSecurityEnabled(prefBool("security_enabled", false));
         // v0.12：打开应用就自动常驻（含后台保活），用户不必再点「启动常驻接收」
         autoKeepAlive();
         // 首次进入也要读一次信任库：只靠 onResume 的话，界面刚建好时列表是空的
@@ -116,21 +110,12 @@ public class TcController {
         shownDest = Dest.current(activity).getAbsolutePath();
         // 从分享菜单进来的要先把文件收下，再让用户选目标
         handleShareIntent(intent);
-        // 磁贴/通知点「推送剪贴板」：此时界面在前台，系统才允许读剪贴板
-        if (intent != null && intent.getBooleanExtra("clip_push", false)) {
-            intent.removeExtra("clip_push");
-            pushClipboardNow();
-        }
         maybeRunProbe(intent);
     }
 
     /** 应用已在后台时被再次分享：复用当前界面，不叠新的 Activity（manifest 里 singleTop）。 */
     public void onNewIntent(Intent intent) {
         handleShareIntent(intent);
-        if (intent != null && intent.getBooleanExtra("clip_push", false)) {
-            intent.removeExtra("clip_push");
-            pushClipboardNow();
-        }
     }
 
     public void onResume() {
@@ -146,8 +131,6 @@ public class TcController {
             return;
         }
         refreshAll();
-        uiTick.removeCallbacks(clipTick);
-        uiTick.post(clipTick);
         uiTick.removeCallbacks(recvTick);
         uiTick.post(recvTick);
     }
@@ -158,13 +141,10 @@ public class TcController {
         refreshTrust();
         refreshRecent();
         refreshSendHistory();
-        refreshClip();
     }
 
     public void onPause() {
-        // 界面不在前台就别再刷了，省电也避免持有 Activity 引用
-        uiTick.removeCallbacks(clipTick);
-        uiTick.removeCallbacks(recvTick);
+        // 界面不在前台就别再刷了，省电也避免持有 Activity 引用        uiTick.removeCallbacks(recvTick);
     }
 
     /**
@@ -287,29 +267,7 @@ public class TcController {
         final String identityDir = ReceiverService.identityDir(activity).getAbsolutePath();
         new Thread(() -> {
             String out;
-            if ("clip_start".equals(cmd)) {
-                ClipService.start(activity);
-                out = "{\"ok\":true,\"started\":true}";
-            } else if ("clip_stop".equals(cmd)) {
-                ClipService.stop(activity);
-                out = "{\"ok\":true,\"stopped\":true}";
-            } else if ("clip_pull".equals(cmd)) {
-                out = TcNative.clipPullJson(identityDir, ClipService.clipTarget(activity),
-                        pref("send_fp"), intent.getLongExtra("tc_since", 0), Build.MODEL);
-            } else if ("clip_push".equals(cmd)) {
-                String text = intent.getStringExtra("tc_text");
-                out = TcNative.clipPushJson(identityDir, ClipService.clipTarget(activity),
-                        pref("send_fp"), text == null ? "" : text, false, Build.MODEL);
-            } else if ("clip_read".equals(cmd)) {
-                try {
-                    Thread.sleep(intent.getLongExtra("tc_delay", 2000));
-                } catch (InterruptedException ignored) {
-                }
-                String now = readClipboard();
-                String expect = intent.getStringExtra("tc_expect");
-                out = "{\"ok\":true,\"len\":" + now.length() + ",\"match\":"
-                        + (expect != null && expect.equals(now)) + "}";
-            } else if ("list".equals(cmd)) {
+            if ("list".equals(cmd)) {
                 out = TcNative.listPath(path == null ? "/storage/emulated/0" : path);
             } else if ("discover".equals(cmd)) {
                 out = runDiscover(timeoutMs);
@@ -1357,100 +1315,16 @@ public class TcController {
                 .getString(key, def);
     }
 
-    public void refreshClip() {
-        String who = targetName == null || targetName.isEmpty() ? targetAddr : targetName;
-        ui.setClipText((ClipService.isRunning() ? "同步：已开启" : "同步：未开启")
-                + " · 对端：" + (who == null || who.isEmpty() ? "未选择" : who)
-                + "\n" + ClipService.lastStatus());
+    private boolean prefBool(String key, boolean def) {
+        return activity.getSharedPreferences(Dest.PREFS, Activity.MODE_PRIVATE)
+                .getBoolean(key, def);
     }
 
-    /** 端口留空就按默认 53320 存；关闭同步时不改用户填的值。 */
-    public void saveClipPort() {
-        String p = ui.getClipPort().trim();
-        if (p.isEmpty()) {
-            p = "53320";
-        }
+    /** v1.2.0：切换「安全」总开关并持久化。关只收起管理入口，不放开接收信任门禁。 */
+    public void setSecurityEnabled(boolean enabled) {
         activity.getSharedPreferences(Dest.PREFS, Activity.MODE_PRIVATE)
-                .edit().putString("clip_port", p).apply();
-        ui.setClipPort(p);
-    }
-
-    /** 端口输入框双向绑定用；真正落盘走 saveClipPort()。 */
-    public void setClipPort(String value) {
-        ui.setClipPort(value == null ? "" : value);
-    }
-
-    public void startClip() {
-        // 前台服务必须有通知权限，Android 13+ 没授权会直接把服务拒掉
-        ensureNotificationPermission();
-        saveClipPort();
-        ClipService.start(activity);
-        refreshClip();
-    }
-
-    public void stopClip() {
-        ClipService.stop(activity);
-        refreshClip();
-    }
-
-    /**
-     * 把当前剪贴板推给对端。
-     * 只能在界面处于前台时调用：后台服务读剪贴板会被系统拦成空内容。
-     */
-    public void pushClipboardNow() {
-        if (targetFp.isEmpty() || ClipService.clipTarget(activity).isEmpty()) {
-            toast("先在「发现附近的设备」里选一个目标");
-            return;
-        }
-        saveClipPort();
-        String text = readClipboard();
-        if (text.isEmpty()) {
-            toast("剪贴板是空的");
-            return;
-        }
-        final String body = text;
-        toast("正在推送…");
-        new Thread(() -> {
-            String out = TcNative.clipPushJson(
-                    ReceiverService.identityDir(activity).getAbsolutePath(),
-                    ClipService.clipTarget(activity), targetFp, body, false, Build.MODEL);
-            String msg;
-            try {
-                JSONObject o = new JSONObject(out == null ? "{}" : out);
-                msg = o.optBoolean("ok")
-                        ? "已推送 " + o.optLong("size") + " 字节"
-                        : "推送失败：" + o.optString("reason", "未知原因");
-                android.util.Log.i("TONGCHUAN-CLIP", "push ok=" + o.optBoolean("ok")
-                        + " size=" + o.optLong("size") + " bytes=" + body.length());
-            } catch (Exception e) {
-                msg = "推送结果解析失败：" + e.getMessage();
-                android.util.Log.w("TONGCHUAN-CLIP", "push parse failed", e);
-            }
-            final String m = msg;
-            activity.runOnUiThread(() -> {
-                toast(m);
-                refreshClip();
-            });
-        }, "tc-clip-push").start();
-    }
-
-    /** 读系统剪贴板；取不到（后台/空/异常）一律返回空串，由调用方提示。 */
-    private String readClipboard() {
-        try {
-            android.content.ClipboardManager cm = (android.content.ClipboardManager)
-                    activity.getSystemService(Context.CLIPBOARD_SERVICE);
-            if (cm == null || !cm.hasPrimaryClip() || cm.getPrimaryClip() == null) {
-                return "";
-            }
-            ClipData cd = cm.getPrimaryClip();
-            if (cd.getItemCount() == 0) {
-                return "";
-            }
-            CharSequence t = cd.getItemAt(0).coerceToText(activity);
-            return t == null ? "" : t.toString();
-        } catch (Exception e) {
-            return "";
-        }
+                .edit().putBoolean("security_enabled", enabled).apply();
+        ui.setSecurityEnabled(enabled);
     }
 
     /**

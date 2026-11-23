@@ -88,23 +88,7 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <!-- v0.8 剪贴板同步：常驻前台服务，只做「从对端拉 + 写剪贴板」 -->
-        <service
-            android:name=".ClipService"
-            android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
 
-        <!-- v0.8 快捷设置磁贴：点一下把界面带到前台再读剪贴板推送（后台读会被系统拦） -->
-        <service
-            android:name=".ClipTileService"
-            android:exported="true"
-            android:icon="@drawable/ic_launcher"
-            android:label="推送剪贴板"
-            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
-            <intent-filter>
-                <action android:name="android.service.quicksettings.action.QS_TILE" />
-            </intent-filter>
-        </service>
 
         <receiver
             android:name=".BootReceiver"

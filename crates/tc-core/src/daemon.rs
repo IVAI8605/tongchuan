@@ -61,8 +61,6 @@ pub struct Config {
     /// 只改名不删除（规范 #21），归档文件的清理由人工按批次列清单确认。
     pub log_max_bytes: u64,
     pub queue_dir: PathBuf,
-    /// 剪贴板中继监听地址（v0.6）。空串=不启动：剪贴板里可能有密码，默认关闭。
-    pub clip_listen: String,
     /// 管理页「浏览…」的根目录白名单（v0.13.3）。非空时只列这些目录，且只能在其中浏览；
     /// 空 = 按旧行为列盘符（Windows）或 `/`。NAS 上配好后管理页就不会翻到系统目录。
     pub browse_roots: Vec<PathBuf>,
@@ -110,7 +108,6 @@ impl Default for Config {
             // 4 MiB：按单条约 150 字节估算约 2.7 万行，家用场景下大约几周一份，够回溯又不占盘
             log_max_bytes: 4 * 1024 * 1024,
             queue_dir: base.join("queue"),
-            clip_listen: String::new(),
             // 缺省不限制：Windows 直接列盘符，与旧行为一致；NAS 建议显式配置
             browse_roots: Vec::new(),
             // 4 条流：Wi-Fi 上单流通常吃不满链路，4 条实测收益明显；有线链路按需调小

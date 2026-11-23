@@ -28,9 +28,6 @@ auto_accept = true
 # 信任表是 identity_dir/trust.jsonl，用 tc trust 命令或管理页维护
 trust_mode = "closed"
 
-# 剪贴板中继（v0.6）。留空=不启动；剪贴板里可能有密码，默认关闭。
-# 开启后 `tc clip push|watch|status` 连这个端口，历史落在 identity_dir/clip-history.jsonl
-# clip_listen = "0.0.0.0:53320"
 
 # 管理页「浏览…」的根目录白名单（v0.13.3）。配了之后只列这些目录，且只能在其中浏览；
 # 留空 = 旧行为（Windows 列盘符并带卷标名，Linux 列 /）。NAS 上建议显式配置，避免翻到系统目录。

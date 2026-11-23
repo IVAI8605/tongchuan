@@ -107,14 +107,6 @@ pub fn run(opts: &DiagOptions) -> io::Result<PathBuf> {
                     )
                 }
             ));
-            report.push_str(&format!(
-                "剪贴板中继：{}\n",
-                if cfg.clip_listen.trim().is_empty() {
-                    "未启用".to_string()
-                } else {
-                    cfg.clip_listen.clone()
-                }
-            ));
             if let Some(p) = &opts.config_path {
                 report.push_str(&format!("配置文件：{}\n", p.display()));
             }

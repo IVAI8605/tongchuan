@@ -1,7 +1,6 @@
 //! 通传内核：协议、校验、落盘、会话状态机。
 //! v0.2 起传输层抽象成明文 TCP 与 TLS 1.3 两条路，帧、清单、校验和续传状态机共用一份。
 
-pub mod clip;
 pub mod daemon;
 pub mod diag;
 pub mod discover;

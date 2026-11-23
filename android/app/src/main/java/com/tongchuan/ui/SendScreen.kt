@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -28,8 +27,10 @@ import com.tongchuan.PeerEntry
 import com.tongchuan.TcController
 
 /**
- * 发送页：选目标 → 选落点 → 选内容 → 发送 → 看进度与历史。
- * 所有状态都来自 {@link com.tongchuan.UiState}，用户动作回调控制器。
+ * 发送页。v1.2.0 起区块顺序固定为：
+ * 发送到 → 发送内容 → 开始发送 → 附近设备 → 接收位置 → 最近发送。
+ * 「扫码配对 / 展示二维码」不再放在本页正文，改到顶部右上角的扫码图标（见 MainScreen）。
+ * 所有状态来自 {@link com.tongchuan.UiState}，用户动作回调控制器。
  */
 @Composable
 fun SendScreen(controller: TcController) {
@@ -40,7 +41,7 @@ fun SendScreen(controller: TcController) {
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // ---- 目标 ----
+        // 1) 发送到
         item {
             SectionCard(title = "发送到") {
                 Text(
@@ -59,28 +60,8 @@ fun SendScreen(controller: TcController) {
                 )
             }
         }
-        item {
-            PeerList(
-                peers = ui.peers,
-                onToggle = { controller.togglePeer(it.addr, it.fp, it.name) },
-            )
-        }
 
-        // ---- 落点 ----
-        item {
-            SectionCard(title = "接收位置") {
-                Text(
-                    text = ui.destText,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .clickable { controller.chooseDestination() },
-                )
-            }
-        }
-
-        // ---- 选内容 ----
+        // 2) 发送内容
         item {
             SectionCard(title = "发送内容") {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -89,10 +70,6 @@ fun SendScreen(controller: TcController) {
                     OutlinedButton(onClick = { controller.pickSendFolder() },
                         modifier = Modifier.weight(1f)) { Text("选择文件夹") }
                 }
-                OutlinedButton(
-                    onClick = { controller.openScanner() },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("扫二维码配对") }
                 Text(
                     text = ui.pickedText,
                     style = MaterialTheme.typography.bodySmall,
@@ -109,7 +86,7 @@ fun SendScreen(controller: TcController) {
             }
         }
 
-        // ---- 发送 ----
+        // 3) 开始发送
         item {
             SectionCard(title = "开始发送") {
                 Button(
@@ -154,7 +131,29 @@ fun SendScreen(controller: TcController) {
             }
         }
 
-        // ---- 历史 ----
+        // 4) 附近设备
+        item {
+            PeerList(
+                peers = ui.peers,
+                onToggle = { controller.togglePeer(it.addr, it.fp, it.name) },
+            )
+        }
+
+        // 5) 接收位置
+        item {
+            SectionCard(title = "接收位置") {
+                Text(
+                    text = ui.destText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .clickable { controller.chooseDestination() },
+                )
+            }
+        }
+
+        // 6) 最近发送
         item {
             SectionCard(title = "最近发送") {
                 if (ui.history.isEmpty()) {
@@ -220,7 +219,6 @@ private fun PeerList(peers: List<PeerEntry>, onToggle: (PeerEntry) -> Unit) {
 
 @Composable
 private fun HistoryRow(item: HistoryItem) {
-    val ext = com.tongchuan.ui.theme.LocalExtendedColors.current
     Text(
         text = item.text,
         style = MaterialTheme.typography.bodySmall,

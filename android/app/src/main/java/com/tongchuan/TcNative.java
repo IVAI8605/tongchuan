@@ -85,21 +85,7 @@ public final class TcNative {
      */
     public static native String discoverPeers(long timeoutMs, String identityDir);
 
-    /**
-     * 剪贴板拉取（v0.8）：返回 {"ok":true,"has":bool,"lamport":N} 或
-     * {"ok":true,"has":true,"id","origin","size","sensitive","preview","text","lamport"}。
-     * `since` 传上一次拿到的 lamport；服务端只回比它新的一条。
-     */
-    public static native String clipPullJson(String identityDir, String target, String peerFp,
-                                             long since, String deviceName);
 
-    /**
-     * 剪贴板推送（v0.8）：把一段文本推到对端。超过 64 KiB 会被内核直接拒绝（内容不截断）。
-     * 返回 {"ok":true,"id","size"} 或 {"ok":false,"reason"}。
-     * deviceName 传 Build.MODEL：Android 没有 HOSTNAME，不传对端历史里会显示 unknown。
-     */
-    public static native String clipPushJson(String identityDir, String target, String peerFp,
-                                             String text, boolean sensitive, String deviceName);
 
     // ---- v0.20 二维码配对 ----
     // 令牌表在 Rust 侧与接收端门禁共享，所以界面上的「立即作废」对门禁立刻生效。
