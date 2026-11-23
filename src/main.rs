@@ -853,8 +853,11 @@ fn run(args: &[String]) -> io::Result<()> {
                 });
             }
             {
+                // 公告用设备别名而非系统主机名：主机名取不到会变成 unknown，别名是用户认识的名字
+                let mut dev = local_device();
+                dev.name = cfg.alias.clone();
                 let ann = discover::announcement_for(
-                    local_device(),
+                    dev,
                     fp.clone(),
                     port_of(&cfg.listen),
                     env!("CARGO_PKG_VERSION"),

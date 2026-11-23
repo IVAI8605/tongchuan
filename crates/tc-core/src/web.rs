@@ -42,6 +42,7 @@ section{
 h2{font-size:16px;font-weight:600;margin:0 0 16px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(0,1fr));gap:14px}
 .item{min-width:0}
+.row .item{flex:1 1 200px;min-width:160px}
 .label{display:block;color:var(--muted);font-size:13px;margin-bottom:4px}
 .value{font-size:17px;overflow-wrap:break-word;min-width:0}
 table{width:100%;border-collapse:collapse;font-size:14px}
@@ -52,7 +53,7 @@ button,input{font:inherit;color:var(--ink)}
 select{font:inherit;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--surface);max-width:100%}
 button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 18px;cursor:pointer}
 button:hover{background:#185a4b}
-input[type=text]{border:1px solid var(--line);border-radius:8px;padding:8px 10px;width:min(320px,100%)}
+input[type=text]{border:1px solid var(--line);border-radius:8px;padding:8px 10px;width:100%}
 button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .row{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
 .hint{color:var(--muted);font-size:13px;margin-top:10px}
@@ -88,8 +89,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
     <button id="sendGo">发送</button>
   </div>
   <div class="row mt">
-    <div class="item"><span class="label">配对码（可选）</span><input type="text" id="sendPair" placeholder="对端要求配对码时填，仅本次使用"></div>
-    <div class="item"><span class="label">强制重传</span>
+    <div class="item" style="flex:1"><span class="label">强制重传</span>
       <label><input type="checkbox" id="sendForce"> 忽略接收端已有文件，本次全部重传（同名旧文件改名让位，不删除）</label>
     </div>
   </div>
@@ -126,6 +126,8 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
   <p class="hint">默认关闭：同网段能搜到就能传，无需配对。需要严格指纹配对时，展开这里管理信任设备与配对二维码。</p>
   <div id="secBody" style="display:none">
     <div class="row"><label><input type="checkbox" id="strictMode"> 严格配对模式（开启后需指纹/配对；关闭则同网段发现即可传，默认关闭）</label></div>
+    <h3 style="margin-top:8px">发送时配对码（可选）</h3>
+    <div class="row"><div class="item" style="flex:1"><span class="label">配对码</span><input type="text" id="sendPair" placeholder="对端要求配对码时才填，仅本次使用"></div></div>
     <h3>信任设备</h3>
     <p class="hint" id="trustMode">加载中</p>
     <table><thead><tr><th>别名</th><th>指纹</th><th>来源</th><th>首次批准</th><th>操作</th></tr></thead><tbody id="trust"><tr><td colspan="5" class="empty">加载中</td></tr></tbody></table>
@@ -155,10 +157,12 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
 
 <section>
   <h2>设置</h2>
-  <div class="row">
-    <div class="item"><span class="label">设备别名</span><input type="text" id="setAlias"></div>
-    <div class="item"><span class="label">自动接收（已配对设备）</span><input type="checkbox" id="setAuto"></div>
+  <div class="row mt">
+    <div class="item" style="flex:1 1 260px"><span class="label">设备别名</span><input type="text" id="setAlias" style="width:100%"></div>
     <button id="save">保存</button>
+  </div>
+  <div class="row mt">
+    <div class="item" style="flex:1"><label><input type="checkbox" id="setAuto"> 自动接收（已配对设备）</label></div>
   </div>
   <p class="hint" id="saveMsg">修改后立即生效，写入配置文件。</p>
 </section>

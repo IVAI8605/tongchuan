@@ -6,7 +6,10 @@
 //! 取代原来「PowerShell 托盘 + VBS 启动 + 注册表右键」的脚本拼装。
 //! 关窗只是隐藏到托盘，托盘菜单可「打开管理页 / 重启接收 / 退出」。
 
+use std::os::windows::process::CommandExt;
 use std::process::{Child, Command};
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -17,27 +20,28 @@ struct Daemon {
 }
 
 /// 首次运行在应用数据目录生成 config.toml：落点/端口/信任默认开放（与其余端一致）。
+/// 注意：Windows 路径写进 TOML 时反斜杠会被当转义符（`\U` 报 unicode 错），统一转成正斜杠。
 fn default_config(data: &std::path::Path) -> String {
-    let recv = data.join("received");
+    let norm = |p: std::path::PathBuf| p.display().to_string().replace('\\', "/");
+    let recv = norm(data.join("received"));
     format!(
         "alias = \"通传PC\"\n\
          listen = \"0.0.0.0:53318\"\n\
          manage = \"0.0.0.0:53319\"\n\
-         destination = \"{}\"\n\
-         allow = [\"{}\"]\n\
-         identity_dir = \"{}\"\n\
-         log_dir = \"{}\"\n\
-         queue_dir = \"{}\"\n\
+         destination = \"{recv}\"\n\
+         allow = [\"{recv}\"]\n\
+         identity_dir = \"{id}\"\n\
+         log_dir = \"{log}\"\n\
+         queue_dir = \"{q}\"\n\
          log_days = 2\n\
          log_level = \"info\"\n\
          trust_mode = \"open\"\n\
          streams = 4\n\
          hash_cache = true\n",
-        recv.display(),
-        recv.display(),
-        data.join("identity").display(),
-        data.join("logs").display(),
-        data.join("queue").display(),
+        recv = recv,
+        id = norm(data.join("identity")),
+        log = norm(data.join("logs")),
+        q = norm(data.join("queue")),
     )
 }
 
@@ -58,6 +62,7 @@ fn start_daemon(app: &tauri::AppHandle, d: &Daemon) -> Result<(), String> {
         .arg("daemon")
         .arg("--config")
         .arg(&cfg)
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("启动接收进程失败: {e}"))?;
     *d.child.lock().unwrap() = Some(child);
