@@ -60,3 +60,5 @@ tongchuan-target/
 *.exe
 windows-gui/src-tauri/bin/tc.exe
 /windows-gui/src-tauri/target/
+
+__pycache__/

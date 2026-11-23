@@ -18,7 +18,7 @@
 | `crates/tc-core` | 传输协议、会话、信任、剪贴板内核 |
 | `crates/tc-jni` | Android JNI 门面 |
 | `android/` | Android 客户端（包名 `com.tongchuan`） |
-| `scripts/windows/` | Windows 托盘、右键菜单、隐藏发送、截屏剪贴板桥 |
+| `src/windows-gui/` | Windows 桌面端（Tauri 2：原生托盘 + 管理页窗口 + NSIS 安装包） |
 | `configs/` | 配置模板；本机 `config.toml` 不入库 |
 | `tests/windows/` | PowerShell 回归测试 |
 | `../dist/通传-1.0.0.apk` | 最近的 Android 交付包（本地产物，不提交） |
@@ -43,9 +43,9 @@ CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang" \
 CXX_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang++" \
 AR_aarch64_linux_android="$NDK_BIN/llvm-ar" \
 CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang" \
-CARGO_TARGET_DIR=/tmp/tongchuan-android-target \
+CARGO_TARGET_DIR=/vol1/1000/SSD/DSH/AI/_tool/build/tongchuan-android-target \
 cargo build --release -p tc-jni --target aarch64-linux-android
-cp /tmp/tongchuan-android-target/aarch64-linux-android/release/libtc_jni.so \
+cp /vol1/1000/SSD/DSH/AI/_tool/build/tongchuan-android-target/aarch64-linux-android/release/libtc_jni.so \
    android/app/src/main/jniLibs/arm64-v8a/
 
 # 2) Gradle 打包：共享 gradle 缓存本机无法初始化 native services，
@@ -65,7 +65,7 @@ cp ~/.android/debug.keystore cache/home/.android/
 test -s cache/home/.android/debug.keystore || { echo "签名 key 缺失，停止构建"; exit 1; }
 
 # Windows 打包（在 Windows 侧跑）
-pwsh -NoProfile -File scripts/windows/make-installer.ps1
+cd src/windows-gui/src-tauri && npx @tauri-apps/cli@2 build
 ```
 
 ## 当前功能

@@ -54,7 +54,7 @@ cargo build --release --workspace
 
 注意两点：
 
-- 构建目录走 `.cargo/config.toml`。仓库只带模板 [.cargo/config.example.toml](./.cargo/config.example.toml)：先复制成 `.cargo/config.toml`（该文件不入库），再把 `target-dir` 指到项目之外的纯 ASCII 目录——仓库目录名是中文时，`ring` 的 `ar`/链接器打不开中文路径下的产物。报 `cannot open output file ... No such file or directory` 时，直接用环境变量覆盖：`$env:CARGO_TARGET_DIR=(Join-Path $env:TEMP 'tongchuan-target')`（或 `export CARGO_TARGET_DIR=/tmp/tongchuan-target`）。模板里还说明了发布构建为什么要同时开 `strip` 与路径重映射。
+- 构建目录走 `.cargo/config.toml`。仓库只带模板 [.cargo/config.example.toml](./.cargo/config.example.toml)：先复制成 `.cargo/config.toml`（该文件不入库），再把 `target-dir` 指到项目之外的纯 ASCII 目录——仓库目录名是中文时，`ring` 的 `ar`/链接器打不开中文路径下的产物。报 `cannot open output file ... No such file or directory` 时，直接用环境变量覆盖：`export CARGO_TARGET_DIR=/vol1/1000/SSD/DSH/AI/_tool/build/tongchuan-target`（NAS 上统一用这个；**不要用系统盘 `/tmp`**，32G 盘会被构建写爆）。模板里还说明了发布构建为什么要同时开 `strip` 与路径重映射。
 - 版本号只在根 `Cargo.toml` 写一次，CLI、Android 应用、安装包都从那里读，不要手写第二份。
 
 ### Android
@@ -72,7 +72,7 @@ cargo build --release --workspace
 需要 NSIS（`makensis` 在 PATH 中）：
 
 ```powershell
-& pwsh -NoProfile -File scripts/windows/make-installer.ps1
+# Windows 桌面端（Tauri 2）：cd src/windows-gui/src-tauri ; npx @tauri-apps/cli@2 build
 ```
 
 ### 跑一遍门禁
