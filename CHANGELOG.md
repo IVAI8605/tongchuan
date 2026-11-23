@@ -10,7 +10,9 @@
 - 新增（管理页鉴权）：改为密码登录——首次打开要求设置密码（加盐 blake3 迭代 10000 次存 `identity/manage.pwd`，0600、不落明文），之后凭密码登录，会话 Cookie（HttpOnly）；NAS 与 Windows 网页共用同一份 `web.rs`。忘了密码删 `manage.pwd` 重设。
 - 变更（网页 UI）：右上角加「展示二维码」按钮；「信任设备 / 待确认 / 配对」收进可折叠「安全」区块（默认收起）；「历史」与「日志」合并为「记录（历史与日志，近 2 天）」。
 - 变更（安全默认开放）：daemon 默认 `trust_mode` 由 `closed` 改为 `open`（安全功能默认关 = 同网段发现即可传）；网页「安全」区块新增「严格配对模式」开关，打开才切 `closed` 走指纹配对、热生效。旧配置无 `trust_mode` 也按 `open`。
-- 版本：安卓 `1.3.0`（versionCode 10300，从 Cargo 版本读）；Windows 端 `0.21.0`（`scripts/windows/VERSION` 独立版本源，安装器/DisplayVersion 用它）；飞牛 fpk `1.0.0`（`src/fpk` 打包，内含 tc 1.3.0）。
+- 版本：安卓 `1.3.0`（versionCode 10300，从 Cargo 版本读）；Windows 端 `0.21.0`（`scripts/windows/VERSION` 独立版本源，安装器/DisplayVersion 用它）；飞牛 fpk `1.0.1`（`src/fpk` 打包，内含 tc 1.3.0）。
+- 变更（信任 open 不写表）：`open` 模式只放行、不再把陌生发送方写进信任表（避免信任表堆满 `unknown`）；要按设备管理信任就切 `closed`。
+- fpk 迁移：`cmd/main` 支持首次启动从 `/vol2/1000/好3T/通传接收/.identity-import` 导入旧 `identity.cer/key`+`trust.jsonl`（私钥不进包），实现升级后延续原 NAS 指纹与信任。
 - 兼容：协议仍 `0.20`（`DestEntry` 加 `is_default` 为向后兼容字段，旧端忽略；升协议会拦旧端，故不动）。
 - 测试：`cargo test --workspace` 全绿（e2e `discovery_announce` 为已知 NAS 组播 flaky，不修）。
 - 实测（2026-11-23）：密码登录全流程 curl 通过（首开设置→设密建会话→带 cookie 进管理页→无 cookie API 401→重启变登录页→错密 401/对密 200）；管理页冒烟 25KB、各新区块就位；安卓 1.3.0 真机升级成功并显示 v1.3.0；fpk 内含 tc 1.3.0。

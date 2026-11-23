@@ -325,13 +325,9 @@ impl TrustGate {
         }
 
         if self.mode == TrustMode::Open {
-            if let Some(fp) = &fp_hex {
-                // 只记第一次，避免同一台设备每次发送都追加一条 add
-                if !self.store.is_trusted(fp)? {
-                    self.store
-                        .approve(fp, "", &device.name, &device.platform, "open")?;
-                }
-            }
+            // 安全功能默认关闭（open）：只放行，不把陌生发送方写进信任表。
+            // 否则信任表会堆满 name=unknown 的自动条目，反而让人误判「谁被信任了」；
+            // 真要审计就看历史/日志。需要按设备管理信任时，把模式切到 closed。
             return Ok(GateVerdict::Allow);
         }
 

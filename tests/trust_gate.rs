@@ -179,7 +179,7 @@ fn empty_pair_code_never_auto_trusts() {
 }
 
 #[test]
-fn open_mode_allows_and_records_reason() {
+fn open_mode_allows_without_recording_trust() {
     let root = test_dir("open");
     let src = make_source(&root);
     let server = Identity::load_or_create(&root.join("srv")).unwrap();
@@ -189,9 +189,9 @@ fn open_mode_allows_and_records_reason() {
 
     let report = run_once(&server, &client, gate, None, &src, &root.join("recv")).unwrap();
     assert_eq!(report.verdict, "OK");
+    // v0.21.0 起 open 只放行、不自动写信任表（否则信任表堆满 name=unknown）
     let peers = store.list().unwrap();
-    assert_eq!(peers.len(), 1);
-    assert_eq!(peers[0].added_by, "open");
+    assert_eq!(peers.len(), 0);
 }
 
 #[test]

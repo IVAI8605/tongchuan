@@ -12,6 +12,20 @@ OUT="${DATA_DIR}/logs/daemon.out"
 
 mkdir -p "${DATA_DIR}" "${DATA_DIR}/identity" "${DATA_DIR}/logs" "${DATA_DIR}/queue" 2>/dev/null
 
+# 可选：首次启动前从本地卷导入旧设备身份与信任，延续原 NAS 指纹（升级迁移用）。
+# 私钥不进 fpk 包，只在本地卷临时放，导入后把 import 目录改名留档。
+IMPORT_DIR="/vol2/1000/好3T/通传接收/.identity-import"
+if [ -d "${IMPORT_DIR}" ] && [ -f "${IMPORT_DIR}/identity.cer" ]; then
+    mkdir -p "${DATA_DIR}/identity"
+    cp -f "${IMPORT_DIR}/identity.cer" "${DATA_DIR}/identity/identity.cer" 2>/dev/null
+    cp -f "${IMPORT_DIR}/identity.key" "${DATA_DIR}/identity/identity.key" 2>/dev/null
+    [ -f "${IMPORT_DIR}/trust.jsonl" ] && cp -f "${IMPORT_DIR}/trust.jsonl" "${DATA_DIR}/identity/trust.jsonl" 2>/dev/null
+    chown -R root:root "${DATA_DIR}/identity" 2>/dev/null
+    chmod 600 "${DATA_DIR}/identity"/* 2>/dev/null
+    mv "${IMPORT_DIR}" "${IMPORT_DIR}.done.$(date +%s)" 2>/dev/null || true
+    echo "imported identity from ${IMPORT_DIR}"
+fi
+
 # 首次运行落一份可编辑配置：接收落点、端口都在这里，改完 restart 生效
 if [ ! -f "${CFG}" ]; then
     cat > "${CFG}" <<CFG

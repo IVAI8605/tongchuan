@@ -27,7 +27,7 @@ import tarfile
 import zlib
 
 APP_NAME = "tongchuan"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 DISPLAY_NAME = "通传 · 局域网互传"
 WEB_PORT = 53319          # 管理页端口（桌面入口指向它）
 XFER_PORT = 53318         # 传输端口（TCP+UDP）
