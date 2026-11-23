@@ -55,3 +55,8 @@ tongchuan-target/
 # 本地工作状态，2026-11-13 起放项目根且不入库；只忽略根上这一份，docs\ 内同名文件不受影响
 /项目状态卡.md
 *.fpk
+
+# Windows Tauri 桌面端产物
+*.exe
+windows-gui/src-tauri/bin/tc.exe
+/windows-gui/src-tauri/target/
