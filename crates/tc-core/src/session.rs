@@ -2166,7 +2166,13 @@ fn handle_session(
         if skipped_set.contains(&i) {
             continue;
         }
-        let mut part = store.open_part(&layout.part_paths[i], f)?;
+        // v0.22：单块小文件走懒创建——不在这里预建 .tcpart/.map，等收到那一块时再落盘，
+        // 避免「上万个小文件开局就各建两套空文件」的元数据风暴。多块文件仍走 open() 保留续传。
+        let mut part = if f.block_count() <= 1 {
+            store.prepare_part(&layout.part_paths[i], f)?
+        } else {
+            store.open_part(&layout.part_paths[i], f)?
+        };
         let missing = part.missing();
         resumed_blocks += f.block_count() as u64 - missing.len() as u64;
         for b in missing {
@@ -2389,7 +2395,11 @@ fn handle_session(
         match stored {
             Ok(path) => {
                 // v0.19：校验并改名成功后才写回源修改时间；写不进去只记日志，不影响交付
-                store.apply_mtime(Path::new(&path), f.mtime);
+                // v0.22：单块非空文件已在 write_block 用打开的句柄写回了 mtime，无需再 reopen；
+                // 空文件（0 块，从未 write_block）与多块文件仍在这里写回。
+                if f.size == 0 || f.block_count() > 1 {
+                    store.apply_mtime(Path::new(&path), f.mtime);
+                }
                 // v0.19：本次确认无误的文件记进缓存，下次重发同一目录可跳过重读
                 if let Some(cache) = cache {
                     record_received(cache, Path::new(&path), f);

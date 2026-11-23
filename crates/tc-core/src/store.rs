@@ -119,6 +119,9 @@ pub struct PartFile {
     /// v0.19：块数 ≤ 1 的小文件不续传。续传最多省下一个块，留下的半成品却更碍事；
     /// 这类文件失败后按状态卡 2.1 的例外精准删除，而不是像多块文件那样改名隔离。
     no_resume: bool,
+    /// 源文件最后修改时间（秒）。单块文件写完即完整，直接在这个已打开的句柄上写回，
+    /// 省掉收尾阶段为每张照片再 open 一次的元数据开销。
+    mtime: i64,
 }
 
 impl PartFile {
@@ -149,6 +152,7 @@ impl PartFile {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(dest)?;
         let mut part = Self::from_file(file, dest.to_path_buf(), map_path, entry)?;
         // 走真实路径创建的半成品文件，句柄可以随时关掉再按路径重开
@@ -207,11 +211,17 @@ impl PartFile {
         }
         // 位图不可用时先重写头：否则新的追加行会接在 "DONE" 或旧块号后面，
         // 下次启动解析仍然失败，看起来像「每次都要重传」。
-        if !map_usable {
-            fs::write(&map_path, map_header(entry))?;
-        }
-        // 追加句柄常驻，避免每块重复 open/close；写入量从 O(块数) 降到每块一行
-        let map_file = OpenOptions::new().append(true).create(true).open(&map_path)?;
+        // v0.22：单块小文件不续传，连位图都不建——位图只在多块续传时才有价值，
+        // 为每张照片建一个 .map 再删掉纯属浪费元数据事务。
+        let map_file = if no_resume {
+            None
+        } else {
+            if !map_usable {
+                fs::write(&map_path, map_header(entry))?;
+            }
+            // 追加句柄常驻，避免每块重复 open/close；写入量从 O(块数) 降到每块一行
+            Some(OpenOptions::new().append(true).create(true).open(&map_path)?)
+        };
 
         if received.is_empty() {
             // 预分配到最终大小，这样按块号 seek 写入不会留下空洞。
@@ -234,12 +244,47 @@ impl PartFile {
             file_size: entry.size,
             received,
             file: Some(file),
-            map_file: Some(map_file),
+            map_file,
             // 默认按「句柄不可重开」处理，由 open() 显式打开这个能力
             reopen_safe: false,
             block_hashes: entry.block_hashes.clone(),
             verified_on_write: HashSet::new(),
             no_resume,
+            mtime: entry.mtime,
+        })
+    }
+
+    /// v0.22：单块小文件的懒创建入口。只准备内存里的元数据，不碰磁盘——
+    /// 不建 `.tcpart`、不建 `.map`、不预分配。真正的文件在收到第一块（也就是唯一一块）
+    /// 时由 `write_block` 里的 `ensure_file` 一次性建立并写完。
+    ///
+    /// 这样做把「上万个照片文件开局就各建两套空文件」这个纯浪费的元数据风暴去掉了：
+    /// 原来每个 ≤1 块的文件要经历 建.tcpart + 建.map + 写位图头 + 追加一行 + 改名 + 删.map
+    /// 约 6 次元数据事务，现在只剩 建.tcpart + 写块 + 改名 三次。
+    ///
+    /// 只用于 `block_count() <= 1` 的文件；多块文件仍走 `open()`，保留位图续传能力。
+    pub fn prepare(part_path: &Path, entry: &FileEntry) -> io::Result<Self> {
+        debug_assert!(entry.block_count() <= 1, "prepare 只用于单块小文件");
+        let map_path = PathBuf::from(format!("{}.map", part_path.to_string_lossy()));
+        // 与 v0.19 一致：上次失败留下的半成品/位图无续传价值，按状态卡 2.1 例外精准删除。
+        remove_residue(&map_path, "单块懒创建：上次留下的位图");
+        remove_residue(part_path, "单块懒创建：上次留下的半成品");
+        if let Some(parent) = part_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        Ok(Self {
+            path: part_path.to_path_buf(),
+            map_path,
+            total_blocks: entry.block_count(),
+            file_size: entry.size,
+            received: HashSet::new(),
+            file: None,
+            map_file: None,
+            reopen_safe: true,
+            block_hashes: entry.block_hashes.clone(),
+            verified_on_write: HashSet::new(),
+            no_resume: true,
+            mtime: entry.mtime,
         })
     }
 
@@ -304,7 +349,17 @@ impl PartFile {
 
     fn ensure_file(&mut self) -> io::Result<&mut File> {
         if self.file.is_none() {
-            self.file = Some(OpenOptions::new().read(true).write(true).open(&self.path)?);
+            // v0.22：带 create —— 懒创建路径下，单块小文件的 .tcpart 在收到第一块时才真正建立。
+            // 多块续传场景中文件本就存在（open() 已建），create 对已存在文件无副作用。
+            // truncate(false)：续传时必须保留已有块，绝不能截断。
+            self.file = Some(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&self.path)?,
+            );
         }
         Ok(self.file.as_mut().expect("just opened"))
     }
@@ -344,7 +399,26 @@ impl PartFile {
             file.flush()?;
         }
         self.received.insert(idx);
-        self.append_map(idx)
+        if self.no_resume {
+            // v0.22：单块文件写完即完整，不必建位图（本来就不续传）；
+            // 顺手在这个已打开的句柄上写回源 mtime，省掉收尾阶段的一次 reopen。
+            self.apply_mtime_handle();
+            Ok(())
+        } else {
+            self.append_map(idx)
+        }
+    }
+
+    /// 在已打开的写句柄上直接设置修改时间。失败只忽略——时间不对不等于数据错，
+    /// 与 Store::apply_mtime 的「写不进去只记日志」口径一致。
+    fn apply_mtime_handle(&mut self) {
+        if self.mtime < 0 {
+            return;
+        }
+        if let Some(f) = self.file.as_mut() {
+            let when = UNIX_EPOCH + std::time::Duration::from_secs(self.mtime as u64);
+            let _ = f.set_times(fs::FileTimes::new().set_modified(when));
+        }
     }
 
     /// 每收一块只追加一行块号。断电/被杀后仍能从缺口续传；
@@ -498,6 +572,11 @@ impl PartFile {
 pub trait Store {
     fn make_dirs(&self, dirs: &[PathBuf]) -> io::Result<()>;
     fn open_part(&mut self, part_path: &Path, entry: &FileEntry) -> io::Result<PartFile>;
+    /// v0.22：为「一块以内」的小文件懒创建半成品（不碰磁盘，收块时才落盘）。
+    /// 默认退回 eager 的 open_part，保证其它后端不实现时行为不变、仍能正确工作。
+    fn prepare_part(&mut self, part_path: &Path, entry: &FileEntry) -> io::Result<PartFile> {
+        self.open_part(part_path, entry)
+    }
     /// 返回最终落点的展示用标识（SAF 下是文档 URI 或相对路径）。
     fn finalize(&mut self, part: &mut PartFile, final_path: &Path) -> io::Result<String>;
     /// 强制重传：同名旧文件改名让位，本次文件占源文件名。
@@ -524,6 +603,10 @@ impl Store for PathStore {
 
     fn open_part(&mut self, part_path: &Path, entry: &FileEntry) -> io::Result<PartFile> {
         PartFile::open(part_path, entry)
+    }
+
+    fn prepare_part(&mut self, part_path: &Path, entry: &FileEntry) -> io::Result<PartFile> {
+        PartFile::prepare(part_path, entry)
     }
 
     fn finalize(&mut self, part: &mut PartFile, final_path: &Path) -> io::Result<String> {
@@ -833,9 +916,8 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".stale-"))
             .count();
         assert_eq!(stale, 0, "删除而不是隔离");
-        // 打开后位图重建为本次身份的空头，旧块号不能被继承
-        let text = fs::read_to_string(&map).unwrap();
-        assert_eq!(text.lines().count(), 1, "只应剩头行");
+        // v0.22：单块小文件本来就不续传，现在连位图都不建——旧位图被精准删除后不再重建。
+        assert!(!map.exists(), "单块小文件不应保留或重建位图");
     }
 
     /// v0.19 删除例外的防线：非半成品路径一律拒绝删除。
@@ -924,5 +1006,52 @@ mod tests {
             b"old content",
             "旧文件只改名，内容不变"
         );
+    }
+
+    /// v0.22：单块小文件懒创建——prepare 不碰磁盘；write_block 只建 .tcpart（无 .map）；
+    /// 收尾改名后不留位图；内容与 mtime 都正确，且全程不产生 .map。
+    #[test]
+    fn single_block_prepare_is_lazy_and_skips_map() {
+        let dir = std::env::temp_dir().join(format!("tc-store-lazy-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("tiny.jpg.tcpart");
+        let map = PathBuf::from(format!("{}.map", dest.to_string_lossy()));
+        let data = vec![0x33u8; 4096];
+        let (blake3, block_hashes) = crate::hash::hash_reader(&data[..]).unwrap();
+        let entry = FileEntry {
+            id: "f0".into(),
+            root_id: "r0".into(),
+            rel_path: "tiny.jpg".into(),
+            size: 4096,
+            mtime: 1_600_000_123,
+            mode: 0o644,
+            blake3,
+            block_hashes,
+        };
+        assert_eq!(entry.block_count(), 1, "样本应是单块文件");
+
+        // prepare 阶段绝不落盘
+        let mut p = PartFile::prepare(&dest, &entry).unwrap();
+        assert!(!dest.exists(), "prepare 不应创建 .tcpart");
+        assert!(!map.exists(), "prepare 不应创建 .map");
+
+        // 写块后才出现 .tcpart，但永不出现 .map
+        p.write_block(0, &data).unwrap();
+        assert!(dest.exists(), "写块后应有 .tcpart");
+        assert!(!map.exists(), "单块文件不应创建位图");
+
+        p.verify(&entry).unwrap();
+        let out = p.finalize(&dir.join("tiny.jpg")).unwrap();
+        assert_eq!(fs::read(&out).unwrap(), data, "内容必须一致");
+        assert!(!map.exists(), "成功后不应残留位图");
+
+        let secs = fs::metadata(&out)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(secs, 1_600_000_123, "mtime 应已写到落盘文件");
     }
 }

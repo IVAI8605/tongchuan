@@ -779,3 +779,51 @@ fn parallel_streams_split_one_large_file() {
         "多流拼回的内容必须与源文件一致"
     );
 }
+
+/// v0.22：批量小文件落盘要做到「懒创建 + 单块不建位图」——传完目录里不留 .tcpart / .map，
+/// 内容与源 mtime 都对。这是手机往 NAS 机械盘传大量照片时的主要元数据开销点。
+#[test]
+fn many_small_files_leave_no_part_or_map_residue() {
+    let base = test_dir("lazy-small");
+    let src = base.join("src");
+    fs::create_dir_all(&src).unwrap();
+    let stamp = 1_550_000_000u64;
+    let when = std::time::UNIX_EPOCH + Duration::from_secs(stamp);
+    for i in 0..40 {
+        let p = src.join(format!("p{i}.jpg"));
+        write_file(&p, format!("photo-{i}").as_bytes());
+        let f = fs::OpenOptions::new().write(true).open(&p).unwrap();
+        f.set_times(fs::FileTimes::new().set_modified(when)).unwrap();
+    }
+    let dest = base.join("dest");
+    fs::create_dir_all(&dest).unwrap();
+    let (listener, addr) = listener_and_addr();
+    let d = dest.clone();
+    let recv = thread::spawn(move || run_receiver_on(listener, &d, None).unwrap());
+    let sent = run_sender(&addr, &[src.clone()]).unwrap();
+    let r = recv.join().unwrap();
+
+    assert_eq!(sent.verdict, "OK");
+    assert!(r.verified, "接收端校验必须通过");
+
+    let dir = dest.join("src");
+    for i in 0..40 {
+        let p = dir.join(format!("p{i}.jpg"));
+        assert_eq!(fs::read(&p).unwrap(), format!("photo-{i}").as_bytes());
+        let secs = fs::metadata(&p)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(secs, stamp, "p{i}.jpg 的 mtime 应等于源时间");
+    }
+    let residue: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".tcpart") || n.ends_with(".map"))
+        .collect();
+    assert!(residue.is_empty(), "不应残留半成品/位图，实际: {residue:?}");
+}
