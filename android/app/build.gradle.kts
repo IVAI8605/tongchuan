@@ -1,3 +1,7 @@
+import java.util.Properties
+import java.io.FileInputStream
+import java.nio.charset.StandardCharsets
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -29,11 +33,29 @@ android {
         ndk { abiFilters += "arm64-v8a" }
     }
 
+    // 正式签名：环境变量 TC_KEYSTORE_PROPS 指向 keystore.properties（含 storeFile/storePassword/keyAlias/keyPassword）时启用，
+    // 否则退回 debug 签名（开发包）。密钥与密码都不入库、不进日志。
+    val ksProps = System.getenv("TC_KEYSTORE_PROPS")?.let { p ->
+        runCatching {
+            Properties().apply { FileInputStream(p).reader(StandardCharsets.UTF_8).use { load(it) } }
+        }.getOrNull()
+    }
+    signingConfigs {
+        if (ksProps != null) {
+            create("release") {
+                storeFile = file(ksProps.getProperty("storeFile"))
+                storePassword = ksProps.getProperty("storePassword")
+                keyAlias = ksProps.getProperty("keyAlias")
+                keyPassword = ksProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            // 自用侧载，不做正式签名；复用调试签名省掉一套密钥管理
-            signingConfig = signingConfigs.getByName("debug")
+            // 设了 TC_KEYSTORE_PROPS 就用正式密钥签，否则退回 debug（开发/自测包）
+            signingConfig = if (ksProps != null) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
         }
     }
 
