@@ -40,8 +40,8 @@ fpk = gzip(tar)
 ## 迁移注意（从手工部署切到 fpk）
 
 1. **端口冲突**：现有手工的 `tc daemon` 占着 53318/53319。装 fpk 前先停它（`kill <pid>`），否则 fpk 应用启动会因端口占用失败。
-2. **身份与信任是新的**：fpk 数据目录 `/vol1/@appdata/tongchuan`（或飞牛分配的路径）是独立的 identity/trust，**不继承**旧 `{{...}}tongchuan/identity`。切换后手机/PC 需要重新配对/批准一次。若要沿用旧身份，可在切换后把旧 `identity/` 拷到新数据目录（等价于延续设备指纹）。
-3. **接收落点**：默认落到应用数据目录的 `received/`。想在「文件管理」里方便看到，编辑数据目录里的 `config.toml` 把 `destination`（连同 `allow`）改成你的共享目录，如 `/vol1/1000/xxx`，然后 `cmd/main restart`。
+2. **信任默认开放（安全功能默认关闭）**：生成的 `config.toml` 里 `trust_mode = "open"`，同网段发现即可传、免配对。要严格指纹配对，改成 `"closed"` 并在受信任名单批准对方。要沿用旧设备身份/信任，把旧 `identity/` 拷进新数据目录即可（fpk 数据目录默认独立、不继承旧 identity）。
+3. **接收落点**：默认 `/vol2/1000/好3T/通传接收`（与手工部署一致）。要换就改数据目录里的 `config.toml` 的 `destination`（连同 `allow`），然后 `cmd/main restart`。
 4. **卸载不删数据**：`uninstall_callback` 只提示数据位置，身份/信任/已收文件都保留。
 
 ## 与源码的关系

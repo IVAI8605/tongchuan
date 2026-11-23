@@ -10,7 +10,7 @@ CFG="${DATA_DIR}/config.toml"
 PID_FILE="${DATA_DIR}/daemon.pid"
 OUT="${DATA_DIR}/logs/daemon.out"
 
-mkdir -p "${DATA_DIR}" "${DATA_DIR}/identity" "${DATA_DIR}/logs" "${DATA_DIR}/queue" "${DATA_DIR}/received" 2>/dev/null
+mkdir -p "${DATA_DIR}" "${DATA_DIR}/identity" "${DATA_DIR}/logs" "${DATA_DIR}/queue" 2>/dev/null
 
 # 首次运行落一份可编辑配置：接收落点、端口都在这里，改完 restart 生效
 if [ ! -f "${CFG}" ]; then
@@ -19,15 +19,16 @@ if [ ! -f "${CFG}" ]; then
 alias = "通传NAS"
 listen = "0.0.0.0:53318"
 manage = "0.0.0.0:53319"
-# 接收落点：默认落在应用数据目录。想在「文件管理」里方便看到，可改成你的共享目录，如 /vol1/1000/xxx
-destination = "${DATA_DIR}/received"
-allow = ["${DATA_DIR}/received"]
+# 接收落点：默认 /vol2/1000/好3T/通传接收（与手工部署一致）。要换就改这里，并让 allow 同步。
+destination = "/vol2/1000/好3T/通传接收"
+allow = ["/vol2/1000/好3T/通传接收"]
 identity_dir = "${DATA_DIR}/identity"
 log_dir = "${DATA_DIR}/logs"
 queue_dir = "${DATA_DIR}/queue"
 log_days = 2
 log_level = "info"
-trust_mode = "closed"
+# 安全功能默认关闭 = 信任校验关闭：同网段发现即可传（自动信任）。要严格指纹配对，改成 "closed"。
+trust_mode = "open"
 streams = 4
 hash_cache = true
 CFG
@@ -44,7 +45,7 @@ report() {
     [ -n "${ip}" ] || ip="NAS的地址"
     echo "  传输端口:   ${ip}:53318（TCP+UDP）"
     echo "  管理页:     http://${ip}:53319/?t=${tok:-<见 identity/manage.token>}"
-    echo "  接收落点:   ${DATA_DIR}/received（可在 ${CFG} 里改）"
+    echo "  接收落点:   /vol2/1000/好3T/通传接收（可在 ${CFG} 里改）"
     echo "  数据目录:   ${DATA_DIR}"
 }
 
