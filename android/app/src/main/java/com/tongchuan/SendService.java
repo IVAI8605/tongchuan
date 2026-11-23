@@ -100,6 +100,15 @@ public class SendService extends Service {
 
         running = true;
         lastResult = null;
+        // v1.1.0：记一条「发送开始」。UI 点击与自动化探针都走 SendService.start，故这里能覆盖两条路径
+        try {
+            JSONObject e = new JSONObject();
+            e.put("target", target);
+            e.put("force", force);
+            e.put("dest", destId == null ? "" : destId);
+            OpsLog.append(this, "send_start", e);
+        } catch (Exception ignored) {
+        }
         startForeground(NOTICE_ID, build("正在发送…"));
 
         new Thread(() -> {
@@ -143,6 +152,24 @@ public class SendService extends Service {
             }
 
             lastResult = out;
+            // v1.1.0：记录发送结果（ok/files/bytes/verdict/reason），成败都留痕。
+            // 这是 UI 与探针两条路径的共同汇聚点，之前缺记录的缺口就在这补上。
+            try {
+                JSONObject o = new JSONObject(out == null ? "{}" : out);
+                JSONObject e = new JSONObject();
+                e.put("ok", o.optBoolean("ok", false));
+                e.put("target", target);
+                e.put("files", o.optLong("files"));
+                e.put("bytes", o.optLong("bytes"));
+                e.put("verdict", o.optString("verdict", ""));
+                e.put("force", force);
+                String reason = o.optString("reason", "");
+                if (!reason.isEmpty()) {
+                    e.put("reason", reason);
+                }
+                OpsLog.append(this, "send_done", e);
+            } catch (Exception ignored) {
+            }
             running = false;
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();

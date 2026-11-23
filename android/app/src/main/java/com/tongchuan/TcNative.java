@@ -62,6 +62,12 @@ public final class TcNative {
     public static native String sendProgress();
 
     /**
+     * v1.1.0：当前接收进度：{"active","percent","bytesReceived","totalBytes","speedBps"}。
+     * 接收页在接收期间约 1 秒轮询一次；不接收时 active=false。
+     */
+    public static native String recvProgress();
+
+    /**
      * 暂停 / 继续当前发送（v0.11）。暂停在块边界生效：不再向对端供块，
      * 连接与已传块都保留，继续后从断点接着发。
      */

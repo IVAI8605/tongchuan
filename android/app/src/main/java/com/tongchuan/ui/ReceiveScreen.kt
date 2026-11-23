@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,6 +29,37 @@ fun ReceiveScreen(controller: TcController) {
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        if (ui.recvReceiving) {
+            item {
+                SectionCard(title = "正在接收") {
+                    Column {
+                        // 有百分比就显示确定进度，扫描/首个采样窗口内显示不确定态
+                        if (ui.recvProgress > 0) {
+                            LinearProgressIndicator(
+                                progress = { ui.recvProgress / 100f },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        if (ui.recvProgressText.isNotEmpty()) {
+                            Text(
+                                ui.recvProgressText,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(top = 6.dp),
+                            )
+                        }
+                        if (ui.recvSpeedText.isNotEmpty()) {
+                            Text(
+                                ui.recvSpeedText,
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.padding(top = 2.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
         if (ui.lastRecvText.isNotEmpty()) {
             item {
                 SectionCard(title = "最近一次接收") {

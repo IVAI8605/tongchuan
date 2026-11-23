@@ -28,6 +28,21 @@ use std::time::{Duration, Instant};
 /// 发现公告里的「设备版本」仍用包版本（见 tc-jni），那只是展示，不参与兼容判定。
 pub const PROTOCOL_VERSION: &str = "0.20";
 
+/// v1.1.0：Android 接收页的实时进度快照（进程级原子）。
+/// 接收是多条流线程写数据，用原子累加天然线程安全；比回调注入简单，避免跨线程继承的麻烦。
+/// 只给单会话接收端（手机 startReceiver）轮询，不参与协议、不上报对端；daemon 端不读它。
+pub static RECV_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static RECV_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static RECV_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// 会话结束（含异常返回）时把 RECV_ACTIVE 复位，避免接收页一直停在「接收中」。
+struct RecvActiveGuard;
+impl Drop for RecvActiveGuard {
+    fn drop(&mut self) {
+        RECV_ACTIVE.store(false, Ordering::Relaxed);
+    }
+}
+
 /// 版本兼容口径：主次版本相同即可互通，补丁号不同视为兼容。
 /// 0.x 阶段小版本就代表协议变更，所以不能只看主版本。
 pub fn protocol_compatible(version: &str) -> bool {
@@ -468,6 +483,18 @@ pub struct SendReport {
     /// v0.17：接收端判定失败的文件，已映射回本机绝对路径（`path`），供历史与重发使用。
     pub failed: Vec<FailedFile>,
     pub verdict: String,
+    /// v1.1.0：整条发送的端到端墙钟（微秒），从开始扫描清单到收到接收端裁决。
+    /// 跟 `data_us` 区分开：这条含扫描与等裁决，是「用户感知的整次耗时」。
+    pub wall_us: u64,
+    /// v1.1.0：数据阶段有效吞吐（字节/秒）= bytes / data_us。
+    /// 用 `data_us` 而不是 `wall_us` 做分母：扫描与等裁决不算传输吞吐。
+    pub avg_bps: u64,
+    /// v1.1.0：清单扫描耗时（微秒）
+    pub scan_us: u64,
+    /// v1.1.0：数据收发耗时（微秒）。多流时是主线程与工作线程共同服务的墙钟，不是累加。
+    pub data_us: u64,
+    /// v1.1.0：等接收端裁决（Done→VerifyOk/VerifyFail）耗时（微秒）
+    pub verify_us: u64,
 }
 
 #[derive(Debug)]
@@ -505,6 +532,12 @@ pub struct ReceiverReport {
     /// 跳过的文件不再请求数据块，但它们的哈希在跳过前已经核对过。
     pub skipped_files: u64,
     pub skipped_bytes: u64,
+    /// v1.1.0：数据阶段墙钟（微秒），从拿到数据连接到末块落盘统计完。
+    /// 不含握手与清单（清单由发送端下发），跟「等数据/写盘/发请求/校验」四段覆盖的区间一致。
+    pub wall_us: u64,
+    /// v1.1.0：数据阶段墙钟均速（字节/秒）= (bytes - skipped_bytes) / wall_us。
+    /// 只算真正传输的字节，跳过的不算；wall_us 为 0 时为 0。
+    pub avg_bps: u64,
 }
 
 fn io_err(msg: impl Into<String>) -> io::Error {
@@ -985,6 +1018,9 @@ pub fn run_sender_with_device_control_opts(
     options: SendOptions,
 ) -> io::Result<SendReport> {
     // 扫描阶段也回报，否则大目录会连续几分钟没有任何界面反馈（本轮实测踩到）
+    // v1.1.0：t_all 量整次端到端；t_scan 只量清单扫描，稍后换算 scan_us。
+    let t_all = std::time::Instant::now();
+    let t_scan = std::time::Instant::now();
     let manifest = {
         let mut scan_cb = |files: u64, bytes: u64| {
             if let Some(cb) = progress.as_mut() {
@@ -998,6 +1034,8 @@ pub fn run_sender_with_device_control_opts(
         };
         crate::manifest::build_manifest_with_progress(paths, device, Some(&mut scan_cb))?
     };
+    // v1.1.0：清单扫描到此结束
+    let scan_us = t_scan.elapsed().as_micros() as u64;
     let mut ctrl = opener.open()?;
 
     write_message(
@@ -1094,6 +1132,8 @@ pub fn run_sender_with_device_control_opts(
     let mut first = conns_iter.next().expect("至少有一条数据连接");
     let mut speed = SpeedWindow::default();
     let mut worker_err: Option<io::Error> = None;
+    // v1.1.0：数据收发阶段墙钟起点（多条流并发服务期间）
+    let t_data = std::time::Instant::now();
     thread::scope(|scope| {
         let mut workers = Vec::new();
         for mut conn in conns_iter {
@@ -1134,10 +1174,14 @@ pub fn run_sender_with_device_control_opts(
             }
         }
     });
+    // v1.1.0：数据收发阶段墙钟结束（多流都 join 完）
+    let data_us = t_data.elapsed().as_micros() as u64;
     if let Some(e) = worker_err {
         return Err(e);
     }
 
+    // v1.1.0：等裁决阶段墙钟起点
+    let t_verify = std::time::Instant::now();
     write_message(
         &mut ctrl,
         &Control::Done {
@@ -1148,6 +1192,16 @@ pub fn run_sender_with_device_control_opts(
         Control::VerifyOk { dest_dirs, .. } => ("OK".to_string(), dest_dirs, Vec::new()),
         Control::VerifyFail { reason, failed } => (reason, Vec::new(), failed),
         other => return Err(io_err(format!("unexpected verdict: {other:?}"))),
+    };
+    // v1.1.0：等裁决阶段墙钟结束；端到端墙钟到此刻为止
+    let verify_us = t_verify.elapsed().as_micros() as u64;
+    let wall_us = t_all.elapsed().as_micros() as u64;
+    // 数据阶段有效吞吐：用真正发出去的字节（bytes_sent）除以数据阶段墙钟，最贴近线速
+    let sent_bytes = bytes_sent.load(Ordering::Relaxed);
+    let avg_bps = if data_us > 0 {
+        sent_bytes.saturating_mul(1_000_000) / data_us
+    } else {
+        0
     };
     // 接收端只知道相对路径；把它映射回本机绝对路径，历史与 `resend --failed` 才能直接用
     for f in &mut failed {
@@ -1167,6 +1221,11 @@ pub fn run_sender_with_device_control_opts(
         dest_dirs,
         failed,
         verdict,
+        wall_us,
+        avg_bps,
+        scan_us,
+        data_us,
+        verify_us,
     })
 }
 
@@ -1812,6 +1871,8 @@ fn recv_stream(
                 let t_write = Instant::now();
                 write_block_to(parts, file_idx as usize, block_idx, &payload)?;
                 st.write_us += t_write.elapsed().as_micros() as u64;
+                // v1.1.0：接收进度累加（多流并发 fetch_add 安全）
+                RECV_BYTES.fetch_add(payload.len() as u64, Ordering::Relaxed);
                 if let Some(v) = inc.as_mut() {
                     v.feed(&manifest.files, file_idx as usize, block_idx, &payload);
                 }
@@ -1845,6 +1906,8 @@ fn recv_stream(
         let t_write = Instant::now();
         write_block_to(parts, file_idx as usize, block_idx, &payload)?;
         st.write_us += t_write.elapsed().as_micros() as u64;
+        // v1.1.0：接收进度累加（逐块兼容路径）
+        RECV_BYTES.fetch_add(payload.len() as u64, Ordering::Relaxed);
         // 顺路把块哈希和根哈希算掉：这段 CPU 本来就在等下一块的空档里，等于白捡
         if let Some(v) = inc.as_mut() {
             v.feed(&manifest.files, file_idx as usize, block_idx, &payload);
@@ -2012,6 +2075,8 @@ fn handle_session(
                 verify_us: 0,
                 skipped_files: 0,
                 skipped_bytes: 0,
+                wall_us: 0,
+                avg_bps: 0,
             });
         }
         other => return Err(io_err(format!("expected MANIFEST, got {other:?}"))),
@@ -2113,6 +2178,14 @@ fn handle_session(
 
     // 数据通道在这里才取：之前必须先回 MANIFEST_ACK，发送端收到它才会开数据连接
     let conns = data_conn.take(&txn_id, streams)?;
+    // v1.1.0：数据阶段墙钟起点。放在拿到数据连接之后，即「首块请求即将发出」处，
+    // 与四段耗时（等数据/写盘/发请求/校验）覆盖的区间对齐，不含握手与清单。
+    let t_wall = std::time::Instant::now();
+    // v1.1.0：初始化接收进度快照；guard 保证无论正常还是异常返回都把 ACTIVE 复位
+    RECV_TOTAL.store(manifest.total_bytes, Ordering::Relaxed);
+    RECV_BYTES.store(0, Ordering::Relaxed);
+    RECV_ACTIVE.store(true, Ordering::Relaxed);
+    let _recv_guard = RecvActiveGuard;
     // P0：分别累计「等数据」与「写盘」的耗时，用来判断慢在哪一段
     let mut wait_us = 0u64;
     let mut write_us = 0u64;
@@ -2218,6 +2291,8 @@ fn handle_session(
         }
     }
 
+    // v1.1.0：数据阶段墙钟结束点。此处块已全部收完落盘（或中断），后续是 DONE 与校验收尾。
+    let wall_us = t_wall.elapsed().as_micros() as u64;
     let interrupted = (blocks_written as usize) < requests.len();
 
     // 协议第 5 步：发送端会在控制通道补一条 DONE，必须先读掉再回裁决。
@@ -2227,6 +2302,13 @@ fn handle_session(
         other => return Err(io_err(format!("expected DONE, got {other:?}"))),
     }
 
+    // v1.1.0：墙钟均速只算真正传输的字节（总量减增量跳过），wall_us 为 0 时记 0 防除零。
+    let transferred_bytes = manifest.total_bytes.saturating_sub(skipped_bytes);
+    let avg_bps = if wall_us > 0 {
+        transferred_bytes.saturating_mul(1_000_000) / wall_us
+    } else {
+        0
+    };
     let base = ReceiverReport {
         txn_id: txn_id.clone(),
         files: manifest.total_files,
@@ -2246,6 +2328,8 @@ fn handle_session(
         verify_us: 0,
         skipped_files: skipped.len() as u64,
         skipped_bytes,
+        wall_us,
+        avg_bps,
     };
 
     if interrupted {

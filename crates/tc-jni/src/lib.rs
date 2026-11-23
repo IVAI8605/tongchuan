@@ -12,6 +12,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 use tc_core::daemon::Config;
 use tc_core::discover::{announce_loop, announcement_for, listen as discover_listen};
 use tc_core::manifest::{local_device, DeviceInfo};
@@ -64,6 +65,53 @@ pub struct SendProgressView {
 
 fn progress_slot() -> &'static Mutex<Option<SendProgressView>> {
     SEND_PROGRESS.get_or_init(|| Mutex::new(None))
+}
+
+/// v1.1.0：接收进程的瞬时速度采样器（上次字节数与采样时刻）。
+/// 接收进度由 tc-core 的进程级原子提供，这里用相邻两次读取做差分算瞬时速度。
+static RECV_SAMPLE: OnceLock<Mutex<(u64, Instant)>> = OnceLock::new();
+fn recv_sample() -> &'static Mutex<(u64, Instant)> {
+    RECV_SAMPLE.get_or_init(|| Mutex::new((0, Instant::now())))
+}
+
+/// v1.1.0：接收进度 JSON：{"active","percent","bytesReceived","totalBytes","speedBps"}。
+/// 由 Android 接收页在接收期间约 1 秒轮询一次；不接收时 active=false。
+pub fn recv_progress_json() -> String {
+    let active = tc_core::session::RECV_ACTIVE.load(Ordering::Relaxed);
+    let bytes = tc_core::session::RECV_BYTES.load(Ordering::Relaxed);
+    let total = tc_core::session::RECV_TOTAL.load(Ordering::Relaxed);
+    // 瞬时速度：与上次采样差分；字节归零（新会话）或间隔太短时给 0，避免抖动
+    let speed = {
+        let mut s = match recv_sample().lock() {
+            Ok(g) => g,
+            Err(_) => return json!({ "active": active, "percent": 0 }).to_string(),
+        };
+        let now = Instant::now();
+        let dt = now.duration_since(s.1).as_secs_f64();
+        if bytes < s.0 {
+            *s = (bytes, now);
+            0
+        } else if dt >= 0.2 {
+            let bps = ((bytes - s.0) as f64 / dt) as u64;
+            *s = (bytes, now);
+            bps
+        } else {
+            0
+        }
+    };
+    let percent = if total == 0 {
+        0
+    } else {
+        ((bytes as f64 / total as f64) * 100.0).round() as u64
+    };
+    json!({
+        "active": active,
+        "percent": percent.min(100),
+        "bytesReceived": bytes,
+        "totalBytes": total,
+        "speedBps": speed,
+    })
+    .to_string()
 }
 
 /// 当前发送进度：{"active":bool,"percent":0-100,"bytesSent":...,"current":...}
@@ -1031,6 +1079,18 @@ pub extern "system" fn Java_com_tongchuan_TcNative_sendProgress<'local>(
     _class: JClass<'local>,
 ) -> jstring {
     match env.new_string(send_progress_json()) {
+        Ok(v) => v.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// v1.1.0：接收进度（给 Android 接收页轮询）。与 sendProgress 同构，只是数据源是接收端原子。
+#[no_mangle]
+pub extern "system" fn Java_com_tongchuan_TcNative_recvProgress<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> jstring {
+    match env.new_string(recv_progress_json()) {
         Ok(v) => v.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }

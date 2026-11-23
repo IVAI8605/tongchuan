@@ -229,6 +229,30 @@ public class ReceiverService extends Service {
         if (s == null) {
             return; // 服务已停，收尾通知无处可发，静默忽略
         }
+        // v1.1.0：记录一次接收完成（数量/字节/校验/中断/来源/落点根名），供事后审计
+        try {
+            JSONObject e = new JSONObject();
+            e.put("files", files);
+            e.put("bytes", bytes);
+            e.put("verified", verified);
+            e.put("interrupted", interrupted);
+            JSONObject o = new JSONObject(infoJson == null ? "{}" : infoJson);
+            e.put("device", o.optString("device", ""));
+            e.put("skipped", o.optLong("skipped"));
+            JSONArray arr = o.optJSONArray("roots");
+            StringBuilder rs = new StringBuilder();
+            if (arr != null) {
+                for (int i = 0; i < arr.length(); i++) {
+                    if (i > 0) {
+                        rs.append(",");
+                    }
+                    rs.append(arr.optString(i));
+                }
+            }
+            e.put("roots", rs.toString());
+            OpsLog.append(s, "recv_done", e);
+        } catch (Exception ignored) {
+        }
         s.showArrived(files, bytes, interrupted, verified, infoJson);
     }
 

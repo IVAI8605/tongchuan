@@ -61,6 +61,14 @@ public class TcController {
             uiTick.postDelayed(this, 2000);
         }
     };
+    /** v1.1.0：接收页实时进度，接收期间每 1 秒刷一次；只在前台跑，进后台就停，省电。 */
+    private final Runnable recvTick = new Runnable() {
+        @Override
+        public void run() {
+            refreshRecvProgress();
+            uiTick.postDelayed(this, 1000);
+        }
+    };
 
     /** 启停是异步的：这段时间内不要用真实状态覆盖「正在启动/停止…」 */
     private volatile boolean recvPending;
@@ -140,6 +148,8 @@ public class TcController {
         refreshAll();
         uiTick.removeCallbacks(clipTick);
         uiTick.post(clipTick);
+        uiTick.removeCallbacks(recvTick);
+        uiTick.post(recvTick);
     }
 
     /** 一次性把各页状态都刷到最新（onResume 与「刷新状态」共用）。 */
@@ -154,6 +164,7 @@ public class TcController {
     public void onPause() {
         // 界面不在前台就别再刷了，省电也避免持有 Activity 引用
         uiTick.removeCallbacks(clipTick);
+        uiTick.removeCallbacks(recvTick);
     }
 
     /**
@@ -314,12 +325,24 @@ public class TcController {
                 Thread mon = new Thread(() -> {
                     long deadline = System.currentTimeMillis() + 3000;
                     boolean started = false;
+                    // v1.1.0：只在进度签名（阶段+百分比）变化时才打日志。
+                    // 原来每 250ms 无条件打一条，2 分钟刷 500+ 条把 logcat 缓冲冲爆、反而冲掉有用信息。
+                    String lastSig = "";
                     while (true) {
                         String p = TcNative.sendProgress();
                         boolean active = p != null && p.contains("\"active\":true");
                         if (active) {
                             started = true;
-                            android.util.Log.i("TONGCHUAN-PROBE", "PROGRESS " + p);
+                            String sig = p;
+                            try {
+                                JSONObject o = new JSONObject(p);
+                                sig = o.optString("phase", "") + ":" + o.optInt("percent", 0);
+                            } catch (Exception ignored) {
+                            }
+                            if (!sig.equals(lastSig)) {
+                                android.util.Log.i("TONGCHUAN-PROBE", "PROGRESS " + p);
+                                lastSig = sig;
+                            }
                         } else if (started) {
                             android.util.Log.i("TONGCHUAN-PROBE", "PROGRESS-DONE " + p);
                             return;
@@ -327,7 +350,7 @@ public class TcController {
                             return;
                         }
                         try {
-                            Thread.sleep(250);
+                            Thread.sleep(1000);
                         } catch (InterruptedException e) {
                             return;
                         }
@@ -361,8 +384,22 @@ public class TcController {
                     }
                 } catch (Exception ignored) {
                 }
+            } else if ("dump-log".equals(cmd)) {
+                // v1.1.0：把 ops-log.jsonl 拷到公共目录，供 adb pull 取回
+                String p = OpsLog.dump(activity);
+                out = p != null
+                        ? "{\"ok\":true,\"path\":\"" + p.replace("\\", "\\\\") + "\"}"
+                        : "{\"ok\":false,\"reason\":\"ops-log 导出失败（可能无写权限）\"}";
             } else {
                 out = "{\"ok\":false,\"reason\":\"unknown tc_cmd\"}";
+            }
+            // v1.1.0：每条探针命令执行完都记一条 probe_result，事后能区分「哪些操作是探针触发的」
+            try {
+                JSONObject e = new JSONObject();
+                e.put("cmd", cmd);
+                e.put("ok", out != null && out.contains("\"ok\":true"));
+                OpsLog.append(activity, "probe_result", e);
+            } catch (Exception ignored) {
             }
             android.util.Log.i("TONGCHUAN-PROBE", out == null ? "null" : out);
         }, "tc-probe").start();
@@ -1687,6 +1724,44 @@ public class TcController {
         // v0.17.1：状态刷新必须联动信任列表，否则被拒后的「待确认」要退出重进才出现。
         // 迁移到 Compose 时漏了这条，这里补回。
         refreshTrust();
+    }
+
+    /**
+     * v1.1.0：接收页实时进度。数据源是内核进程级原子（TcNative.recvProgress）。
+     * 接收中显示「已收 / 总量 · 速度」，不接收时清空；解析失败不抛，保持界面稳定。
+     */
+    private void refreshRecvProgress() {
+        if (!ReceiverService.isRunning()) {
+            ui.setRecvReceiving(false);
+            ui.setRecvProgress(0);
+            ui.setRecvSpeedText("");
+            ui.setRecvProgressText("");
+            return;
+        }
+        String p = TcNative.recvProgress();
+        if (p == null) {
+            ui.setRecvReceiving(false);
+            return;
+        }
+        try {
+            JSONObject o = new JSONObject(p);
+            boolean active = o.optBoolean("active", false);
+            ui.setRecvReceiving(active);
+            if (active) {
+                ui.setRecvProgress(o.optInt("percent", 0));
+                long br = o.optLong("bytesReceived");
+                long tb = o.optLong("totalBytes");
+                long bps = o.optLong("speedBps");
+                // bps 为 0 说明还在首个采样窗口内（或刚好停住），显示「计算中」而不是 0 B/s
+                ui.setRecvSpeedText(bps > 0 ? human(bps) + "/s" : "计算中…");
+                ui.setRecvProgressText("已收 " + human(br) + (tb > 0 ? " / " + human(tb) : ""));
+            } else {
+                ui.setRecvSpeedText("");
+                ui.setRecvProgressText("");
+            }
+        } catch (Exception ignored) {
+            // 解析失败保持上次显示，不清空以免闪烁
+        }
     }
 
     /**

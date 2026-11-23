@@ -63,6 +63,15 @@ fn full_transfer_keeps_tree_empty_dirs_and_separate_roots() {
     assert!(!report.interrupted);
     assert_eq!(send.files, 3);
 
+    // v1.1.0：真实会话必须记录墙钟与吞吐，且接收端 avg_bps 与「传输字节 / 墙钟」自洽
+    assert!(send.wall_us > 0, "发送端端到端墙钟应 > 0");
+    assert!(send.data_us > 0, "发送端数据阶段墙钟应 > 0");
+    assert!(send.avg_bps > 0, "发送端数据阶段均速应 > 0");
+    assert!(report.wall_us > 0, "接收端数据阶段墙钟应 > 0");
+    let transferred = report.bytes.saturating_sub(report.skipped_bytes);
+    let expect_bps = transferred.saturating_mul(1_000_000) / report.wall_us;
+    assert_eq!(report.avg_bps, expect_bps, "接收端均速必须等于 传输字节/墙钟");
+
     assert_eq!(
         fs::read_to_string(dest.join("项目A/src/main.rs")).unwrap(),
         "fn main() {}\n"

@@ -223,12 +223,33 @@ fn send_identity(args: &[String]) -> io::Result<(PathBuf, Identity)> {
     Ok((dir, id))
 }
 
+/// v1.1.0：字节/秒 → 「171.0MiB/s」；0 打 n/a，避免误读成「速度就是 0」。单位由本函数给出。
+fn mib_s(bps: u64) -> String {
+    if bps == 0 {
+        "n/a".to_string()
+    } else {
+        format!("{:.1}MiB/s", bps as f64 / 1_048_576.0)
+    }
+}
+
+/// v1.1.0：某一段耗时 us 内传了 bytes 字节的等效速率（MiB/s）。
+/// 分母是该段耗时本身，多流时各段是累加口径、会偏高，只用于同一配置下的纵向对比。
+/// 段耗时不足 1ms 时打 n/a：几微秒的段（如发请求、零校验）算出来是噪声级的天文数字，没有参考价值。
+fn seg_mib_s(bytes: u64, us: u64) -> String {
+    if us < 1000 {
+        "n/a".to_string()
+    } else {
+        mib_s(bytes.saturating_mul(1_000_000) / us)
+    }
+}
+
 fn print_send(r: &tc_core::SendReport) {
     // dest=：接收端回报的落点根目录名（v0.11），命令行也能看出「传到哪个文件夹」
     // packs=：v0.14 收到的批量请求数，0 表示走的是逐块兼容路径
     // streams=：v0.15 实际开了几条数据连接，1 表示单流
+    // v1.1.0：新增墙钟/均速/分段耗时；放在 verdict 之前，保证「verdict=」仍在行尾、脚本好匹配
     println!(
-        "SEND txn={} files={} bytes={} blocks={} packs={} streams={} skipped={} dest={} verdict={}",
+        "SEND txn={} files={} bytes={} blocks={} packs={} streams={} skipped={} 墙钟={}ms 均速={} 扫描={}ms 数据={}ms 等裁决={}ms dest={} verdict={}",
         r.txn_id,
         r.files,
         r.bytes,
@@ -236,6 +257,11 @@ fn print_send(r: &tc_core::SendReport) {
         r.packs,
         r.streams,
         r.files_skipped,
+        r.wall_us / 1000,
+        mib_s(r.avg_bps),
+        r.scan_us / 1000,
+        r.data_us / 1000,
+        r.verify_us / 1000,
         if r.dest_dirs.is_empty() {
             "-".to_string()
         } else {
@@ -254,8 +280,9 @@ fn print_send(r: &tc_core::SendReport) {
 }
 
 fn print_recv(r: &tc_core::ReceiverReport) {
+    // v1.1.0：补数据阶段墙钟与真实均速（墙钟口径），一次性 recv 与 daemon 两条接收路径口径一致
     println!(
-        "RECV txn={} files={} bytes={} written={} resumed={} streams={} verified={} interrupted={} skipped={}",
+        "RECV txn={} files={} bytes={} written={} resumed={} streams={} verified={} interrupted={} skipped={} 墙钟={}ms 均速={}",
         r.txn_id,
         r.files,
         r.bytes,
@@ -264,7 +291,9 @@ fn print_recv(r: &tc_core::ReceiverReport) {
         r.streams_used,
         r.verified,
         r.interrupted,
-        r.skipped_files
+        r.skipped_files,
+        r.wall_us / 1000,
+        mib_s(r.avg_bps)
     );
 }
 
@@ -1036,10 +1065,12 @@ fn run(args: &[String]) -> io::Result<()> {
                             peer_addr: r.peer_addr.clone().unwrap_or_default(),
                             roots: r.roots.clone(),
                         });
+                        // v1.1.0：真正传的字节 = 总量减增量跳过；段速用各段耗时作分母，多流时是累计口径
+                        let transferred = r.bytes.saturating_sub(r.skipped_bytes);
                         st.log(
                             "info",
                             &format!(
-                                "会话 {} 结束 verified={} interrupted={} 来源={} 落点={} 块={} 已续传={} 增量跳过={} 等数据={}ms 写盘={}ms 发请求={}ms 校验={}ms",
+                                "会话 {} 结束 verified={} interrupted={} 来源={} 落点={} 块={} 已续传={} 增量跳过={} 墙钟={}ms 均速={} 段速[多流累计] 等数据={} 写盘={} 发请求={} 校验={} (等数据={}ms 写盘={}ms 发请求={}ms 校验={}ms)",
                                 r.txn_id,
                                 r.verified,
                                 r.interrupted,
@@ -1050,6 +1081,14 @@ fn run(args: &[String]) -> io::Result<()> {
                                 r.resumed_blocks,
                                 // 增量同步省掉的文件数：日志里要能回答「这次为什么很快就传完了」
                                 r.skipped_files,
+                                // v1.1.0：墙钟与真实均速（墙钟口径，最可信）
+                                r.wall_us / 1000,
+                                mib_s(r.avg_bps),
+                                // v1.1.0：四段等效速率（分母是段耗时，多流累计，仅供纵向对比）
+                                seg_mib_s(transferred, r.wait_us),
+                                seg_mib_s(transferred, r.write_us),
+                                seg_mib_s(transferred, r.req_us),
+                                seg_mib_s(transferred, r.verify_us),
                                 // P0 打点：各段时间换算成毫秒，便于直接对比每块耗时的来源
                                 r.wait_us / 1000,
                                 r.write_us / 1000,

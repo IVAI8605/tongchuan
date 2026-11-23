@@ -87,6 +87,11 @@ class UiState {
     // 接收页
     var recent by mutableStateOf(listOf<RecentItem>())
     var lastRecvText by mutableStateOf("")
+    // v1.1.0：接收实时进度与速度（接收中才显示）
+    var recvReceiving by mutableStateOf(false)
+    var recvProgress by mutableStateOf(0)          // 0-100
+    var recvSpeedText by mutableStateOf("")        // 形如 "87.3 MB/s"
+    var recvProgressText by mutableStateOf("")     // 形如 "已收 512 MB / 1.2 GB"
 
     // 其他
     var force by mutableStateOf(false)
