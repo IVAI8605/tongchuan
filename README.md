@@ -2,7 +2,7 @@
 
 局域网内的文件夹互传工具。手机、电脑、NAS 在同一网段时，直接用一条命令或点几下屏幕，把整个目录（保留相对路径与空目录）传到另一端；不经过任何云端或中继。
 
-当前版本：`1.0.0`（版本号唯一来源是根目录 [Cargo.toml](./Cargo.toml) 的 `workspace.package.version`）。协议版本与包版本解耦，当前协议 `0.20`，与 0.20.x 各端互通。文档索引见 [docs/README.md](./docs/README.md)。
+当前版本：`1.3.0`（版本号唯一来源是根目录 [Cargo.toml](./Cargo.toml) 的 `workspace.package.version`）。协议版本与包版本解耦，当前协议 `0.20`，与 0.20.x 各端互通。文档索引见 [docs/README.md](./docs/README.md)。
 
 ## 能做什么
 
@@ -15,18 +15,19 @@
 - **发现**：UDP 组播/广播/回环公告，`tc discover` 可列出局域网内正在接收的设备及其指纹。
 - **发送历史与重传**：`tc history` / `tc resend`，历史只追加不删行。
 - **离线队列**：对端暂时不可达时先入队，`tc flush` 再补发。
-- **管理页**：守护进程自带一个内嵌的网页，用于看概览、历史、日志、信任设备、改设置。除 `/api/health` 外都需要访问令牌（首次启动自动生成）。
-- **Windows 右键发送**：资源管理器右键文件或文件夹，可直接发送到手机或 NAS；支持通过「发送到」入口一次选择多个文件/文件夹。
-- **剪贴板中继（可选，v0.6 起）**：独立的文本剪贴板通道，默认关闭；Windows 侧配套桥接脚本。
+- **管理页**：守护进程自带内嵌网页，看概览/发送/历史与日志/安全（信任·配对）/设置。首次打开设置管理密码，之后密码登录；`/api/health` 匿名。
+- **Windows 桌面端**：Tauri 2 原生桌面应用——托盘常驻 + 管理页窗口，托盘菜单可「打开管理页 / 重启接收 / 退出」；关窗缩托盘继续接收。
+- **剪贴板中继（可选，默认关闭）**：核心 CLI 保留该能力；安卓端与 Windows 桥接脚本已移除。
 - **诊断**：`tc diag` 一键导出配置、日志与历史，便于排障。
 
 三端形态：
 
 | 端 | 形态 |
 |---|---|
-| Windows / Linux / macOS | 命令行 `tc`（本仓库主程序）；Windows 另有托盘与 NSIS 安装包脚本 |
+| Windows | Tauri 2 桌面应用（`windows-gui/`：原生托盘 + 管理页窗口 + NSIS 安装包）；命令行 `tc` 亦可单独用 |
+| Linux / macOS | 命令行 `tc`（本仓库主程序） |
 | Android | `android/` 下的 App：常驻接收（前台服务 + 无障碍兜底）、发送、分享菜单、历史 |
-| 无头服务器（NAS 等） | `tc daemon` + systemd，管理页浏览操作 |
+| 无头服务器（NAS 等） | 飞牛 fnOS 应用包 `src/fpk/`（或 `tc daemon` + systemd）；管理页浏览操作 |
 
 ## 目录结构
 
@@ -36,8 +37,9 @@ crates/tc-core/      协议、TLS、传输、续传、信任库、历史、剪�
 crates/tc-jni/       Android 侧 JNI 绑定
 android/             Android 应用（Kotlin + Compose + Gradle）
 configs/             配置模板与 systemd unit 模板
-scripts/             构建与验证脚本（verify.ps1、android/、windows/）
-tests/               集成测试（端到端、并发、信任门禁、剪贴板）
+scripts/             构建与验证脚本（verify.ps1、android/）
+windows-gui/         Windows 桌面端（Tauri 2：原生托盘 + 管理页窗口）
+tests/               集成测试（端到端、并发、信任门禁）
 docs/                开发速查（旧规划/报告已移入隔离区）
 assets/              图标等静态资源
 ```
@@ -67,12 +69,13 @@ cargo build --release --workspace
 
 只用 `arm64-v8a`。Release 包复用调试签名，属于自用侧载定位；签名 key 的恢复流程见 [docs/README.md](./docs/README.md)。
 
-### Windows 安装包
+### Windows 桌面端（Tauri 2）
 
-需要 NSIS（`makensis` 在 PATH 中）：
+在 Windows 构建机（需 Rust + Node + WebView2）：
 
 ```powershell
-# Windows 桌面端（Tauri 2）：cd src/windows-gui/src-tauri ; npx @tauri-apps/cli@2 build
+cd windows-gui\src-tauri
+npx @tauri-apps/cli@2 build   # 产物：target\release\bundle\nsis\通传_<版本>_x64-setup.exe
 ```
 
 ### 跑一遍门禁
@@ -99,7 +102,7 @@ cp configs/config.example.toml config.toml
 tc daemon --config config.toml
 ```
 
-首次启动会在 `identity_dir` 下生成设备证书与私钥，以及管理页令牌 `manage.token`。默认端口：
+首次启动会在 `identity_dir` 下生成设备证书与私钥；管理密码哈希存 `identity/manage.pwd`（首次打开网页时设置）。默认端口：
 
 | 端口 | 协议 | 用途 |
 |---|---|---|
@@ -107,7 +110,7 @@ tc daemon --config config.toml
 | 53319 | HTTP | 管理页 |
 | 53320 | TCP | 剪贴板中继（仅当配置里开启 `clip_listen`） |
 
-管理页地址形如 `http://<本机地址>:53319/?t=<令牌>`，用 `?t=` 打开一次后服务端下发 HttpOnly Cookie。令牌文件权限是 0600，不要贴到聊天或日志里。
+管理页地址 `http://<本机地址>:53319/`：首次打开要求设置管理密码，之后密码登录（HttpOnly 会话 Cookie）。密码只存加盐哈希 `identity/manage.pwd`（0600）；忘了可在数据目录删除 `manage.pwd` 重设。
 
 长期运行时用 `configs/tongchuan.service` 作模板装成 systemd 服务，按实际用户与卷路径改 `User`、`WorkingDirectory`、`ReadWritePaths`。
 
@@ -138,10 +141,10 @@ tc diag                                                 # 导出诊断包
 ## 安全模型要点
 
 - 自签证书 + 证书指纹固定，不做域名校验（局域网 IP 会变）。首次连接必须人工确认指纹。
-- 信任模式默认 `closed`：只有信任表内的设备能投递。`open` 只用于排障，切换会写 warn 日志。
+- 信任模式默认 `open`（安全功能默认关闭 = 同网段发现即可传）；开启「严格配对」才切 `closed` 按信任表放行；open 模式只放行、不写信任表。
 - 落点被 `allow` 白名单限制，路径逐段清洗，拒绝 `..` 与越界写入。
 - 剪贴板中继默认关闭——剪贴板里可能有密码，开启前请自行评估。
-- 管理页只做令牌鉴权，不区分用户；不要直接暴露到公网。
+- 管理页用密码登录、不区分用户；不要直接暴露到公网。
 
 ## 文档
 

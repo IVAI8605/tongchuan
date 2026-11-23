@@ -8,8 +8,8 @@
 局域网文件夹互传工具：电脑、手机、NAS 之间走文件通道传目录，不走云端。
 源码在本仓库根目录，Linux 运行二进制在项目上一级（NAS 部署位）。
 
-当前版本：`1.0.0`（唯一来源 `Cargo.toml` 的 `workspace.package.version`）。
-协议：`0.20`，已与包版本解耦（`tc-core` 里固定为 `0.20`）；Android `1.0.0` 与 0.20.x 的电脑 / NAS 互通，无需同步升级。Windows `tc.exe` 仍为 `0.20.0`，可接。
+当前版本：`1.3.0`（**三端统一**，唯一来源 `Cargo.toml` 的 `workspace.package.version`）。
+协议：`0.20`，已与包版本解耦（`tc-core` 里固定为 `0.20`）；三端 1.3.0（安卓 / Windows / 飞牛 fpk）与 0.20.x 各端互通。
 
 ## 目录
 
@@ -20,8 +20,8 @@
 | `android/` | Android 客户端（包名 `com.tongchuan`） |
 | `src/windows-gui/` | Windows 桌面端（Tauri 2：原生托盘 + 管理页窗口 + NSIS 安装包） |
 | `configs/` | 配置模板；本机 `config.toml` 不入库 |
-| `tests/windows/` | PowerShell 回归测试 |
-| `../dist/通传-1.0.0.apk` | 最近的 Android 交付包（本地产物，不提交） |
+| `tests/windows/` | Windows 回归测试（旧 PowerShell 版，已随旧版搁置） |
+| `../dist/通传-1.3.0.apk` | 最近的 Android 交付包（本地产物，不提交） |
 
 运行数据在项目根的 `identity/`、`logs/`、`queue/`、`received/`，含设备私钥，不入库、不重构。
 
@@ -71,12 +71,12 @@ cd src/windows-gui/src-tauri && npx @tauri-apps/cli@2 build
 ## 当前功能
 
 - 文件/文件夹发送：`tc send --to <addr> --peer-fp <fp> --dir <path>`；Android/Windows 客户端封装。
-- Windows 右键：`通传发送到手机` / `通传发送到NAS`，走 `wscript + send-hidden.vbs`，无命令窗。
-- 剪贴板：文本同步走 `tc clip`；手机截屏自动发送见下。
-- 截屏同步（0.20.1）：Android `ScreenshotWatcher` 监听 `Pictures/Screenshots`，新截图走文件通道到电脑；Windows `screenshot-clipboard.ps1` 把收到的 `Screenshot*` 图片写入剪贴板。
+- Windows 桌面端（Tauri 2）：托盘常驻 + 管理页窗口；在管理页里发送、看历史、管理安全。旧版右键发送（VBS）已随旧版移除。
+- 剪贴板：核心 CLI `tc clip` 保留；安卓端剪贴板同步已移除。
+- 截屏同步：Android `ScreenshotWatcher` 监听 `Pictures/Screenshots`，新截图走文件通道发出；Windows 侧写剪贴板脚本已随旧版移除。
 
 ## 约定
 
-- 只本地提交，未经明确允许不 push、不建 Release。
+- 发版 push / GitHub Release 需明确授权（v1.3.0 已授权发布）。
 - 清理只移不删，移动前留清单；不写 `identity/identity.key`、`config.toml`、`.cargo/config.toml`、运行时数据。
 - 构建产物放项目外；仓库只保留源码、脚本、模板和这份速查。
