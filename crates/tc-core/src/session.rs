@@ -86,6 +86,10 @@ pub fn version_reject_from_receiver(receiver: &str) -> String {
 pub struct DestEntry {
     pub id: String,
     pub name: String,
+    /// v1.2.1：这一项是不是接收端的默认落点（config 的 destination）。
+    /// 发送端据此在「接收位置」上标「(默认文件夹)」；旧端不返回时按 false。
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 /// v0.14：一次请求多块的帧负载。用 (fileId, blockIndex) 列表表达，
@@ -132,6 +136,7 @@ fn dest_list(destinations: &[Destination], default: &Path) -> Vec<DestEntry> {
         return vec![DestEntry {
             id: "default".into(),
             name,
+            is_default: true,
         }];
     }
     destinations
@@ -139,6 +144,7 @@ fn dest_list(destinations: &[Destination], default: &Path) -> Vec<DestEntry> {
         .map(|d| DestEntry {
             id: d.id.clone(),
             name: d.name.clone(),
+            is_default: d.path.as_path() == default,
         })
         .collect()
 }

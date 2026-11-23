@@ -535,6 +535,7 @@ public class TcController {
      */
     private void updatePickedLabel(int skipped) {
         if (pickedPaths.isEmpty()) {
+            ui.setPickedItems(java.util.Collections.emptyList());
             ui.setPickedText(skipped > 0
                     ? "选中的 " + skipped + " 项都无法定位到手机存储，请改用「选择文件夹」或从「内部存储」里选"
                     : "尚未选择要发送的内容");
@@ -564,6 +565,16 @@ public class TcController {
         if (skipped > 0) {
             sb.append("（另有 ").append(skipped).append(" 项无法定位，已跳过）");
         }
+        // v1.2.1：缩略展示已选内容（最多 8 条名字，超出给总数）
+        java.util.List<String> items = new ArrayList<>();
+        for (String p : pickedPaths) {
+            items.add(new File(p).getName());
+            if (items.size() >= 8) {
+                items.add("…共 " + pickedPaths.size() + " 项");
+                break;
+            }
+        }
+        ui.setPickedItems(items);
         ui.setPickedText(sb.toString());
     }
 
@@ -629,19 +640,30 @@ public class TcController {
                     if (id.isEmpty()) {
                         continue;
                     }
-                    destOptions.add(new String[]{id, d.optString("name", id)});
+                    destOptions.add(new String[]{id, d.optString("name", id),
+                            d.optBoolean("is_default", false) ? "1" : "0"});
                 }
             }
         } catch (Exception ignored) {
         }
         List<DestOption> opts = new ArrayList<>();
         for (String[] d : destOptions) {
-            opts.add(new DestOption(d[0], d[1]));
+            opts.add(new DestOption(d[0], d[1], "1".equals(d[2])));
         }
         ui.setDestOptions(opts);
-        ui.setDestText(destOptions.isEmpty()
-                ? "默认"
-                : "默认（点选，共 " + destOptions.size() + " 个可选）");
+        // v1.2.1：显示默认落点名 +（默认文件夹）；不暴露真实路径
+        String dn = defaultDestName();
+        ui.setDestText(dn.isEmpty() ? "默认文件夹" : dn + "（默认文件夹）");
+    }
+
+    /** v1.2.1：当前对端默认落点的显示名（来自 is_default 项）；没有返回空串。 */
+    private String defaultDestName() {
+        for (String[] d : destOptions) {
+            if (d.length > 2 && "1".equals(d[2])) {
+                return d[1];
+            }
+        }
+        return "";
     }
 
     /** 点落点行：单目标且有可选时弹出选择；多目标与无可选都按原口径提示/重查。 */
@@ -667,11 +689,13 @@ public class TcController {
         if (which == 0) {
             destId = "";
             ui.setDestId("");
-            ui.setDestText("默认");
+            String dn = defaultDestName();
+            ui.setDestText(dn.isEmpty() ? "默认文件夹" : dn + "（默认文件夹）");
         } else {
-            destId = destOptions.get(which - 1)[0];
+            String[] d = destOptions.get(which - 1);
+            destId = d[0];
             ui.setDestId(destId);
-            ui.setDestText(destOptions.get(which - 1)[1]);
+            ui.setDestText("1".equals(d[2]) ? d[1] + "（默认文件夹）" : d[1]);
         }
     }
 

@@ -15,7 +15,7 @@ data class PeerEntry(
 )
 
 /** 对端可用的接收落点。 */
-data class DestOption(val id: String, val name: String)
+data class DestOption(val id: String, val name: String, val isDefault: Boolean = false)
 
 /** 一条发送历史（文案已按中文口径拼好）。 */
 data class HistoryItem(val ts: Long, val who: String, val ok: Boolean, val text: String)
@@ -53,6 +53,8 @@ class UiState {
     var destId by mutableStateOf("")
     var destDialogVisible by mutableStateOf(false)
     var pickedText by mutableStateOf("尚未选择要发送的内容")
+    /** v1.2.1：已选内容的缩略名列表，展示在发送内容两按钮上方 */
+    var pickedItems by mutableStateOf(listOf<String>())
     var sendProgress by mutableStateOf(0)
     var sendIndeterminate by mutableStateOf(true)
     var sendProgressText by mutableStateOf("")

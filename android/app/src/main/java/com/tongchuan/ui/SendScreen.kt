@@ -64,6 +64,18 @@ fun SendScreen(controller: TcController) {
         // 2) 发送内容
         item {
             SectionCard(title = "发送内容") {
+                // v1.2.1：已选内容的缩略展示，放在两个选择按钮上方
+                if (ui.pickedItems.isNotEmpty()) {
+                    Column {
+                        ui.pickedItems.forEach { name ->
+                            Text(
+                                name,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { controller.pickSendFiles() },
                         modifier = Modifier.weight(1f)) { Text("选择文件") }
@@ -240,14 +252,17 @@ private fun DestinationDialog(
         text = {
             Column {
                 TextButton(onClick = { onPick(0) }, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (currentId.isEmpty()) "● 默认位置" else "默认位置")
+                    val dn = options.firstOrNull { it.isDefault }?.name
+                    val label = if (dn != null) "$dn（默认文件夹）" else "默认位置"
+                    Text(if (currentId.isEmpty()) "● $label" else label)
                 }
                 options.forEachIndexed { index, opt ->
                     TextButton(
                         onClick = { onPick(index + 1) },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text(if (opt.id == currentId) "● ${opt.name}" else opt.name)
+                        val label = if (opt.isDefault) "${opt.name}（默认文件夹）" else opt.name
+                        Text(if (opt.id == currentId) "● $label" else label)
                     }
                 }
             }
