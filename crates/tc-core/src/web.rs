@@ -5,7 +5,7 @@ use crate::daemon::{DaemonState, PeerInfo};
 use crate::trust::{TrustEvent, TrustedPeer};
 use crate::queue::now_secs;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -96,7 +96,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
   <div id="browseMask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:50"></div>
   <div id="browse" style="display:none;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(560px,92vw);max-height:82vh;overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;box-shadow:0 18px 50px rgba(0,0,0,.25);z-index:51">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-      <strong style="font-size:15px">选择目录</strong>
+      <strong style="font-size:15px">选择目录 / 文件</strong>
       <button id="browseClose" style="margin-left:auto">关闭</button>
     </div>
     <div class="hint" id="browsePath" style="margin-bottom:8px">—</div>
@@ -104,9 +104,10 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
       <button id="browseUp">上级</button>
       <button id="browsePick">选这个目录</button>
     </div>
+    <div class="hint" style="margin-bottom:8px">目录点进去继续翻，文件点一下填进上面的发送框</div>
     <div id="browseList" style="max-height:52vh;overflow:auto"></div>
   </div>
-  <p class="hint" id="sendMsg">选好设备与目录后点发送；重复发送同一目录时，接收端会按内容跳过已经有的文件。</p>
+  <p class="hint" id="sendMsg">选好设备与目录 / 文件后点发送；重复发送时，接收端会按内容跳过已经有的文件。</p>
   <p class="hint" id="sendProgress" style="display:none"></p>
   <button id="sendRetry" style="display:none;margin-top:8px">重试</button>
 </section>
@@ -282,12 +283,17 @@ function browse(p){
     fill('browsePath',browseCur||'（磁盘 / 根目录）')
     document.getElementById('browseUp').style.display=browseParent?'inline-block':'none'
     var el=document.getElementById('browseList')
-    var ds=j.dirs||[]
-    el.innerHTML=ds.length?ds.map(function(d){
+    var ds=j.dirs||[],fs=j.files||[],parts=[]
+    if(ds.length)parts.push(ds.map(function(d){
       // 后端给了显示名就用它（盘符会带卷标，如「D: 仓库」），否则退回路径最后一段
       var name=(j.labels&&j.labels[d])?j.labels[d]:(d.replace(/[\\/]+$/,'').split(/[\\/]/).pop()||d)
       return '<div style="margin:4px 0"><button data-dir="'+esc(d)+'" style="width:100%;text-align:left;background:var(--accent-soft);color:var(--ink)">'+esc(name)+'</button></div>'
-    }).join(''):'<p class="empty">没有子目录</p>'
+    }).join(''))
+    if(fs.length)parts.push(fs.map(function(f){
+      var name=f.split(/[\\/]/).pop()||f
+      return '<div style="margin:4px 0"><button data-file="'+esc(f)+'" style="width:100%;text-align:left;background:var(--surface);color:var(--ink);border:1px solid var(--line)">'+esc(name)+'</button></div>'
+    }).join(''))
+    el.innerHTML=parts.length?parts.join(''):'<p class="empty">没有子目录或文件</p>'
   }).catch(function(){fill('browsePath','读取失败');fill('sendMsg','目录读取失败，可直接在输入框手输路径')})
 }
 function closeBrowse(){
@@ -346,6 +352,14 @@ document.getElementById('browsePick').addEventListener('click',function(){
   closeBrowse()
 })
 document.getElementById('browseList').addEventListener('click',function(e){
+  var f=e.target.closest('button[data-file]')
+  if(f){
+    var p=f.getAttribute('data-file')
+    document.getElementById('sendPath').value=p
+    fill('sendMsg','已选文件：'+p)
+    closeBrowse()
+    return
+  }
   var b=e.target.closest('button[data-dir]');if(!b)return
   browse(b.getAttribute('data-dir'))
 })
@@ -353,7 +367,7 @@ document.getElementById('sendGo').addEventListener('click',function(){
   var p=sendPeers[document.getElementById('sendTarget').value]
   var path=document.getElementById('sendPath').value.trim()
   if(!p){fill('sendMsg','先选一台设备（可点「刷新设备」）');return}
-  if(!path){fill('sendMsg','先选一个目录');return}
+  if(!path){fill('sendMsg','先选一个目录或文件');return}
   startSend(p.addr,p.fingerprint,path,document.getElementById('sendForce').checked)
 })
 document.getElementById('sendRetry').addEventListener('click',function(){
@@ -408,6 +422,10 @@ setInterval(status,3000);setInterval(function(){history();logs();trust()},10000)
 </html>
 "##;
 
+const SETUP_PAGE: &str = r##"<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>通传 · 设置管理密码</title><style>body{font-family:system-ui,-apple-system,sans-serif;background:#eef1f0;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}.card{background:#fff;padding:24px 22px;border-radius:14px;width:min(360px,92vw);box-shadow:0 8px 30px rgba(0,0,0,.12)}h1{font-size:18px;color:#1f6f5c;margin:0 0 6px}p{font-size:13px;color:#666;line-height:1.5;margin:0 0 14px}input{width:100%;box-sizing:border-box;padding:10px;margin:6px 0;border:1px solid #ccd4d0;border-radius:8px;font-size:15px}button{width:100%;padding:11px;margin-top:10px;background:#1f6f5c;color:#fff;border:0;border-radius:8px;font-size:15px}#msg{color:#c0392b;font-size:13px;min-height:18px;margin-top:8px}</style></head><body><div class="card"><h1>设置管理密码</h1><p>首次使用，请为通传 NAS 管理页设一个密码（至少 4 位）。以后每次打开都要它登录；忘了可删数据目录的 manage.pwd 重新设。</p><input id="p1" type="password" placeholder="设置密码"><input id="p2" type="password" placeholder="再输一次"><button onclick="go()">设置并进入</button><div id="msg"></div></div><script>async function go(){var a=document.getElementById("p1").value,b=document.getElementById("p2").value,m=document.getElementById("msg");if(a.length<4){m.textContent="密码至少 4 位";return}if(a!==b){m.textContent="两次输入不一致";return}var r=await fetch("/api/setup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:a})});var j={};try{j=await r.json()}catch(e){}if(j.ok){location.reload()}else{m.textContent=j.reason||"设置失败"}}</script></body></html>"##;
+
+const LOGIN_PAGE: &str = r##"<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>通传 · 登录</title><style>body{font-family:system-ui,-apple-system,sans-serif;background:#eef1f0;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}.card{background:#fff;padding:24px 22px;border-radius:14px;width:min(360px,92vw);box-shadow:0 8px 30px rgba(0,0,0,.12)}h1{font-size:18px;color:#1f6f5c;margin:0 0 6px}p{font-size:13px;color:#666;line-height:1.5;margin:0 0 14px}input{width:100%;box-sizing:border-box;padding:10px;margin:6px 0;border:1px solid #ccd4d0;border-radius:8px;font-size:15px}button{width:100%;padding:11px;margin-top:10px;background:#1f6f5c;color:#fff;border:0;border-radius:8px;font-size:15px}#msg{color:#c0392b;font-size:13px;min-height:18px;margin-top:8px}</style></head><body><div class="card"><h1>登录管理页</h1><p>请输入管理密码</p><input id="p1" type="password" placeholder="密码"><button onclick="go()">登录</button><div id="msg"></div></div><script>async function go(){var m=document.getElementById("msg");var r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:document.getElementById("p1").value})});var j={};try{j=await r.json()}catch(e){}if(j.ok){location.reload()}else{m.textContent=j.reason||"登录失败"}}</script></body></html>"##;
+
 #[derive(Serialize)]
 struct Status<'a> {
     version: &'a str,
@@ -429,12 +447,14 @@ struct Status<'a> {
 // 约束：字段名与原 json! 完全一致（含 camelCase，用 serde rename 保留），
 // 不改变对外 JSON 形态；改字段名会同步改这里，前端契约一眼可查。
 
-/// 目录浏览响应（GET /api/dirs）。
+/// 目录浏览响应（GET /api/fs）。
 #[derive(Serialize)]
 struct DirListResp {
     path: String,
     parent: Option<String>,
     dirs: Vec<String>,
+    /// 文件与目录分开列：点文件直接填进发送框，不用手输路径
+    files: Vec<String>,
     labels: HashMap<String, String>,
 }
 
@@ -545,25 +565,103 @@ impl RateLimit {
     }
 }
 
-/// 管理页令牌：首次启动生成 32 字节系统随机数的十六进制串，存 identity 目录下的独立文件。
-/// 不写进 config.toml —— 管理页改设置时会把配置整份重写（注释会丢），令牌也不该混在可读配置里。
-pub fn load_or_create_token(identity_dir: &Path) -> io::Result<String> {
-    let path = identity_dir.join("manage.token");
-    if let Ok(t) = fs::read_to_string(&path) {
-        let t = t.trim().to_string();
-        // 太短的值视为损坏：宁可重新生成，也不要拿一个弱令牌当门禁
-        if t.len() >= 32 {
-            return Ok(t);
+/// 管理页鉴权（v0.21.0）：改为「密码登录」——首次打开设置密码，之后凭密码登录，用会话 Cookie 维持。
+/// 密码只存加盐哈希（identity/manage.pwd，0600），不落明文（规范 #3）。
+/// 会话 id 存内存，进程重启后需重新登录（局域网工具可接受）。
+pub struct WebAuth {
+    pwd_path: PathBuf,
+    sessions: Mutex<HashSet<String>>,
+}
+
+impl WebAuth {
+    pub fn new(identity_dir: &Path) -> Self {
+        WebAuth {
+            pwd_path: identity_dir.join("manage.pwd"),
+            sessions: Mutex::new(HashSet::new()),
         }
     }
-    let mut buf = [0u8; 32];
-    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut buf)
-        .map_err(|_| io::Error::other("生成管理页令牌失败"))?;
-    let token: String = buf.iter().map(|b| format!("{b:02x}")).collect();
-    fs::create_dir_all(identity_dir)?;
-    fs::write(&path, &token)?;
-    restrict_permissions(&path)?;
-    Ok(token)
+    fn pwd_is_set(&self) -> bool {
+        self.pwd_path.exists()
+    }
+    fn set_pwd(&self, pw: &str) -> io::Result<()> {
+        let mut salt = [0u8; 16];
+        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut salt)
+            .map_err(|_| io::Error::other("生成盐失败"))?;
+        let hash = hash_pwd(&salt, pw);
+        if let Some(dir) = self.pwd_path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(&self.pwd_path, format!("{}:{}", hex(&salt), hash))?;
+        restrict_permissions(&self.pwd_path)?;
+        Ok(())
+    }
+    fn verify(&self, pw: &str) -> bool {
+        let Ok(s) = fs::read_to_string(&self.pwd_path) else {
+            return false;
+        };
+        let Some((salt_hex, h)) = s.trim().split_once(':') else {
+            return false;
+        };
+        let Some(salt) = unhex(salt_hex) else {
+            return false;
+        };
+        hash_pwd(&salt, pw) == h
+    }
+    fn new_session(&self) -> String {
+        let mut b = [0u8; 32];
+        let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b);
+        let sid = hex(&b);
+        if let Ok(mut g) = self.sessions.lock() {
+            g.insert(sid.clone());
+        }
+        sid
+    }
+    fn session_valid(&self, headers: &HashMap<String, String>) -> bool {
+        let Some(v) = headers.get("cookie") else {
+            return false;
+        };
+        for part in v.split(';') {
+            if let Some((k, val)) = part.split_once('=') {
+                if k.trim() == "manage_session" {
+                    if let Ok(g) = self.sessions.lock() {
+                        if g.contains(val.trim()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
+/// 加盐 blake3 迭代 10000 次。局域网工具，够用又不慢（一次登录几十毫秒）。
+fn hash_pwd(salt: &[u8], pw: &str) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(salt);
+    h.update(pw.as_bytes());
+    let mut out = h.finalize();
+    for _ in 0..10_000 {
+        let mut h2 = blake3::Hasher::new();
+        h2.update(out.as_bytes());
+        h2.update(salt);
+        out = h2.finalize();
+    }
+    out.to_hex().to_string()
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 #[cfg(unix)]
@@ -575,47 +673,6 @@ fn restrict_permissions(path: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) -> io::Result<()> {
     Ok(())
-}
-
-/// 令牌的三种带法：`X-TC-Token` 头（脚本）、`Authorization: Bearer`（通用客户端）、`tc_token` Cookie（页面）。
-/// `?t=` 是首次打开页面用的：校验通过后响应写 Cookie，之后前端 fetch 自动带上，不必每次拼查询串。
-fn authorized(token: &str, headers: &HashMap<String, String>, query: &str) -> bool {
-    if token.is_empty() {
-        return true; // 未配置令牌时不启用鉴权，仅为兼容旧配置与单元测试
-    }
-    if let Some(v) = headers.get("x-tc-token") {
-        if v.trim() == token {
-            return true;
-        }
-    }
-    if let Some(v) = headers.get("authorization") {
-        if let Some(rest) = v.strip_prefix("Bearer ") {
-            if rest.trim() == token {
-                return true;
-            }
-        }
-    }
-    if let Some(v) = headers.get("cookie") {
-        for part in v.split(';') {
-            if let Some((k, val)) = part.split_once('=') {
-                if k.trim() == "tc_token" && val.trim() == token {
-                    return true;
-                }
-            }
-        }
-    }
-    query_token(query) == Some(token)
-}
-
-fn query_token(query: &str) -> Option<&str> {
-    query.split('&').find_map(|kv| {
-        let (k, v) = kv.split_once('=')?;
-        if k == "t" {
-            Some(v)
-        } else {
-            None
-        }
-    })
 }
 
 /// 取普通查询参数（已做 URL 解码）。只处理本页需要的键，不做通用 querystring 解析。
@@ -669,9 +726,11 @@ fn url_decode(s: &str) -> String {
 /// 目录浏览：给管理页的「浏览…」用。空路径列根：
 /// - 配了 browse_roots 就只列这些目录（NAS 上不该让管理页翻到系统目录）；
 /// - 没配时 Windows 列盘符（带卷标名），其它平台列 `/`。
-/// 只列目录不列文件：发送单个文件时直接手输路径，避免列表被成千上万个文件刷屏。
+/// 目录与文件分开返回：目录点进去继续翻，文件点一下填进发送框。
+/// 各自截断 500 条，避免文件多的目录把目录本身挤没、或一次刷屏卡住页面。
 fn list_dirs(path: &str, roots: &[PathBuf]) -> io::Result<DirListResp> {
     let mut dirs: Vec<String> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
     // 路径 → 显示名。前端优先用它，盘符也能显示成「D: 仓库」
     let mut labels: HashMap<String, String> = HashMap::new();
     let (cur, parent) = if path.trim().is_empty() {
@@ -719,22 +778,27 @@ fn list_dirs(path: &str, roots: &[PathBuf]) -> io::Result<DirListResp> {
         let parent = base.parent().map(|p| p.display().to_string());
         for entry in fs::read_dir(&base)? {
             let entry = entry?;
-            // 跟随符号链接会跳出用户当前所在的树；只认真正的目录项
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            // 跟随符号链接会跳出用户当前所在的树；只认真正的目录项和文件
+            let is_dir = match entry.file_type() {
+                Ok(t) if t.is_dir() => true,
+                Ok(t) if t.is_file() => false,
+                _ => continue,
+            };
+            // v0.13.6：隐藏项不列。管理页是给用户选发送路径的，不是文件管理器
+            if is_hidden_entry(&entry.path()) {
                 continue;
             }
-            // v0.13.6：隐藏目录不列。管理页是给用户选发送目录的，不是文件管理器
-            if is_hidden_dir(&entry.path()) {
-                continue;
-            }
-            dirs.push(entry.path().display().to_string());
+            let p = entry.path().display().to_string();
+            if is_dir { dirs.push(p) } else { files.push(p) }
         }
         (base.display().to_string(), parent)
     };
     dirs.sort_by_key(|a| a.to_lowercase());
-    // 上限只是防止一次返回几万条把页面卡死；正常目录远达不到
+    files.sort_by_key(|a| a.to_lowercase());
+    // 上限只是防止一次返回几万条把页面卡死；两类各自留额，互不挤占
     dirs.truncate(500);
-    Ok(DirListResp { path: cur, parent, dirs, labels })
+    files.truncate(500);
+    Ok(DirListResp { path: cur, parent, dirs, files, labels })
 }
 
 /// 判断 path 是否落在任意一个浏览根内。规范化后再比，避免 `..` 跳出白名单。
@@ -746,9 +810,9 @@ fn within_roots(path: &Path, roots: &[PathBuf]) -> bool {
     })
 }
 
-/// v0.13.6：隐藏目录不进目录树。
+/// v0.13.6：隐藏项不进浏览列表（目录和文件一视同仁）。
 /// Unix 看名字前缀；Windows 再看隐藏属性——`System Volume Information` 这类没有点前缀，只能靠属性识别。
-fn is_hidden_dir(path: &Path) -> bool {
+fn is_hidden_entry(path: &Path) -> bool {
     if let Some(name) = path.file_name() {
         if name.to_string_lossy().starts_with('.') {
             return true;
@@ -832,7 +896,7 @@ pub fn serve(
     state: Arc<DaemonState>,
     addr: &str,
     fingerprint: String,
-    token: Arc<String>,
+    auth: Arc<WebAuth>,
 ) -> io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     let limit = Arc::new(RateLimit {
@@ -844,9 +908,9 @@ pub fn serve(
                 let st = state.clone();
                 let fp = fingerprint.clone();
                 let lim = limit.clone();
-                let tk = token.clone();
+                let au = auth.clone();
                 thread::spawn(move || {
-                    if let Err(e) = handle(stream, &st, &fp, &lim, &tk) {
+                    if let Err(e) = handle(stream, &st, &fp, &lim, &au) {
                         st.log("warn", &format!("管理页连接异常: {e}"));
                     }
                 });
@@ -862,7 +926,7 @@ fn handle(
     state: &Arc<DaemonState>,
     fingerprint: &str,
     limit: &RateLimit,
-    token: &str,
+    auth: &WebAuth,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut first = String::new();
@@ -896,28 +960,121 @@ fn handle(
         reader.read_exact(&mut body)?;
     }
 
-    // 健康检查保持匿名：它只回一个字面量 ok，运维探针和脚本都靠它判活
-    let ok = path == "/api/health" || authorized(token, &headers, &query);
-    let (code, ctype, payload) = if ok {
+    // 设置密码 / 登录：两个不需要既有会话的入口
+    if method == "POST" && path == "/api/setup" {
+        return handle_setup(stream, state, auth, &body);
+    }
+    if method == "POST" && path == "/api/login" {
+        return handle_login(stream, state, auth, &body);
+    }
+
+    let authed = auth.session_valid(&headers);
+    let (code, ctype, payload): (u16, &'static str, Vec<u8>) = if path == "/api/health" {
+        // 健康检查保持匿名：运维探针和脚本都靠它判活
+        (200, "text/plain", b"ok".to_vec())
+    } else if (path == "/" || path == "/index.html") && method == "GET" {
+        if !auth.pwd_is_set() {
+            (200, "text/html", SETUP_PAGE.as_bytes().to_vec())
+        } else if !authed {
+            (200, "text/html", LOGIN_PAGE.as_bytes().to_vec())
+        } else {
+            (200, "text/html", PAGE.as_bytes().to_vec())
+        }
+    } else if authed {
         route(state, &method, &path, &query, &body, fingerprint, limit)
     } else {
         (
             401,
             "text/plain",
-            "401 未授权：请用 http://<本机地址>:53319/?t=<令牌> 打开管理页，令牌在 identity/manage.token\n"
-                .as_bytes()
-                .to_vec(),
+            "401 未授权：请先打开管理页并用密码登录\n".as_bytes().to_vec(),
         )
     };
-    // 只在本次确实用了 ?t= 时下发 Cookie，避免把令牌写进每个响应头
-    let set_cookie = if ok && query_token(&query) == Some(token) && !token.is_empty() {
-        Some(format!("tc_token={token}; Path=/; HttpOnly; SameSite=Strict"))
-    } else {
-        None
-    };
-    // 排障线索只记路径不记 query：?t= 里带管理令牌，落盘等于泄露凭据（规范 #14）
     state.log("debug", &format!("管理页 {method} {path} -> {code}"));
-    write_response(&mut stream, code, ctype, &payload, set_cookie.as_deref())
+    write_response(&mut stream, code, ctype, &payload, None)
+}
+
+/// 设置密码：仅当尚未设置时可调用，成功即建立会话。
+fn handle_setup(
+    mut stream: TcpStream,
+    state: &Arc<DaemonState>,
+    auth: &WebAuth,
+    body: &[u8],
+) -> io::Result<()> {
+    if auth.pwd_is_set() {
+        return write_response(
+            &mut stream,
+            409,
+            "application/json",
+            r#"{"ok":false,"reason":"已设置过密码"}"#.as_bytes(),
+            None,
+        );
+    }
+    let pw = extract_password(body);
+    if pw.trim().len() < 4 {
+        return write_response(
+            &mut stream,
+            400,
+            "application/json",
+            r#"{"ok":false,"reason":"密码至少 4 位"}"#.as_bytes(),
+            None,
+        );
+    }
+    auth.set_pwd(&pw)?;
+    let sid = auth.new_session();
+    let cookie = format!("manage_session={sid}; Path=/; HttpOnly; SameSite=Strict");
+    state.log("info", "管理页已设置密码");
+    write_response(&mut stream, 200, "application/json", r#"{"ok":true}"#.as_bytes(), Some(&cookie))
+}
+
+/// 登录：校验密码，成功建立会话。
+fn handle_login(
+    mut stream: TcpStream,
+    state: &Arc<DaemonState>,
+    auth: &WebAuth,
+    body: &[u8],
+) -> io::Result<()> {
+    if !auth.pwd_is_set() {
+        return write_response(
+            &mut stream,
+            400,
+            "application/json",
+            r#"{"ok":false,"reason":"尚未设置密码"}"#.as_bytes(),
+            None,
+        );
+    }
+    let pw = extract_password(body);
+    if auth.verify(&pw) {
+        let sid = auth.new_session();
+        let cookie = format!("manage_session={sid}; Path=/; HttpOnly; SameSite=Strict");
+        write_response(&mut stream, 200, "application/json", r#"{"ok":true}"#.as_bytes(), Some(&cookie))
+    } else {
+        state.log("warn", "管理页登录失败");
+        write_response(
+            &mut stream,
+            401,
+            "application/json",
+            r#"{"ok":false,"reason":"密码不正确"}"#.as_bytes(),
+            None,
+        )
+    }
+}
+
+/// 从请求体解析密码：前端发 JSON {"password":"..."}；容错也接受表单 password=xxx。
+fn extract_password(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text.trim()) {
+        if let Some(p) = v.get("password").and_then(|x| x.as_str()) {
+            return p.to_string();
+        }
+    }
+    for kv in text.split('&') {
+        if let Some((k, val)) = kv.split_once('=') {
+            if k == "password" {
+                return val.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 fn write_response(
@@ -929,7 +1086,9 @@ fn write_response(
 ) -> io::Result<()> {
     let reason = match code {
         200 => "OK",
+        400 => "Bad Request",
         401 => "Unauthorized",
+        409 => "Conflict",
         429 => "Too Many Requests",
         _ => "Not Found",
     };
@@ -996,7 +1155,7 @@ fn route(
             thread::sleep(std::time::Duration::from_millis(5500));
             json(&state.visible_peers())
         }
-        // 目录浏览：管理页「浏览…」用，只列目录
+        // 目录浏览：管理页「浏览…」用，目录与文件分开列
         ("GET", "/api/fs") => {
             let want = query_value(query, "path");
             // 浏览根是配置项，每次请求读一次：改配置重启后立即生效，不必缓存
@@ -1417,39 +1576,25 @@ mod tests {
         assert_eq!(code, 400);
     }
 
-    /// 令牌三种携带方式都要认，且错误令牌必须拒绝；空令牌（旧配置）不能把页面锁死。
+    /// v0.21.0：管理页密码登录——设置/校验/会话有效。
     #[test]
-    fn token_auth_accepts_all_three_carriers_and_rejects_wrong() {
-        let token = "a".repeat(64);
-        assert!(!authorized(&token, &HashMap::new(), ""));
-
-        let mut h = HashMap::new();
-        h.insert("x-tc-token".into(), token.clone());
-        assert!(authorized(&token, &h, ""));
-
-        let mut h2 = HashMap::new();
-        h2.insert("authorization".into(), format!("Bearer {token}"));
-        assert!(authorized(&token, &h2, ""));
-
-        let mut h3 = HashMap::new();
-        h3.insert("cookie".into(), format!("a=1; tc_token={token}"));
-        assert!(authorized(&token, &h3, ""));
-
-        assert!(authorized(&token, &HashMap::new(), &format!("t={token}")));
-        assert!(!authorized(&token, &HashMap::new(), "t=wrong"));
-        assert!(authorized("", &HashMap::new(), ""));
-    }
-
-    /// 令牌必须落盘且重启后复用：每次启动换新令牌会让书签和脚本全部失效。
-    #[test]
-    fn token_file_is_stable_and_hex() {
-        let dir = std::env::temp_dir().join(format!("tc-token-{}", std::process::id()));
+    fn pwd_set_verify_and_session() {
+        let dir = std::env::temp_dir().join(format!("tc-pwd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let a = load_or_create_token(&dir).unwrap();
-        let b = load_or_create_token(&dir).unwrap();
-        assert_eq!(a, b);
-        assert_eq!(a.len(), 64);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        let a = WebAuth::new(&dir);
+        assert!(!a.pwd_is_set());
+        a.set_pwd("hunter2").unwrap();
+        assert!(a.pwd_is_set());
+        assert!(a.verify("hunter2"));
+        assert!(!a.verify("wrong"));
+        let sid = a.new_session();
+        let mut h = HashMap::new();
+        h.insert("cookie".into(), format!("x=1; manage_session={sid}"));
+        assert!(a.session_valid(&h));
+        let mut h2 = HashMap::new();
+        h2.insert("cookie".into(), "manage_session=bogus".into());
+        assert!(!a.session_valid(&h2));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// v0.10：目录浏览与发送接口的守门条件。
@@ -1484,6 +1629,29 @@ mod tests {
         let (code, _, _) = call(&st, "POST", "/api/send", payload.as_bytes(), "fp", &lim);
         assert_eq!(code, 400);
         assert!(st.send_job.lock().unwrap().is_none(), "被拒绝的请求不该留下任务");
+    }
+
+    /// 管理页浏览页必须能看见文件：目录与文件分开返回，隐藏文件不列，前端有文件按钮。
+    #[test]
+    fn fs_lists_files_and_dirs_separately() {
+        let dir = std::env::temp_dir().join(format!("tc-web-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("子目录")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.join(".hidden.txt"), b"h").unwrap();
+
+        let (st, lim) = fixture("files");
+        let query = format!("path={}", dir.display());
+        let (code, _, body) = route(&st, "GET", "/api/fs", &query, b"", "fp", &lim);
+        assert_eq!(code, 200);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["dirs"].is_array(), "目录列表必须是数组：{v}");
+        assert!(v["dirs"].as_array().unwrap().iter().any(|d| d.as_str().unwrap().ends_with("子目录")));
+        assert!(v["files"].is_array(), "文件列表必须是数组：{v}");
+        let files = v["files"].as_array().unwrap();
+        assert!(files.iter().any(|f| f.as_str().unwrap().ends_with("a.txt")), "文件应可见：{v}");
+        assert!(!files.iter().any(|f| f.as_str().unwrap().ends_with(".hidden.txt")), "隐藏文件不该列出：{v}");
+        assert!(PAGE.contains("data-file"), "页面要渲染文件按钮");
     }
 
     /// v0.20：配对二维码的生成、查看与作废。

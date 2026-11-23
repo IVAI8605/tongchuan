@@ -837,17 +837,17 @@ fn run(args: &[String]) -> io::Result<()> {
             );
             let id = Identity::load_or_create(&cfg.identity_dir)?;
             let fp = id.fingerprint_hex();
-            // 管理页令牌与身份同目录：文件不存在时生成一次，之后每次启动沿用同一令牌
-            let manage_token = Arc::new(web::load_or_create_token(&cfg.identity_dir)?);
+            // 管理页鉴权（v0.21.0）：改为密码登录，会话存内存；首次打开时要求设置密码
+            let manage_auth = Arc::new(web::WebAuth::new(&cfg.identity_dir));
 
             // 管理页、发现广播、发现监听各占一个线程，主线程专心做 TLS 常驻接收
             {
                 let st = state.clone();
                 let addr = cfg.manage.clone();
                 let f = fp.clone();
-                let tk = manage_token.clone();
+                let au = manage_auth.clone();
                 thread::spawn(move || {
-                    if let Err(e) = web::serve(st.clone(), &addr, f, tk) {
+                    if let Err(e) = web::serve(st.clone(), &addr, f, au) {
                         st.log("error", &format!("管理页退出: {e}"));
                     }
                 });
