@@ -8,12 +8,23 @@ param([switch]$DryRun, [string]$OutDir)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
-$toml = Get-Content (Join-Path $root 'Cargo.toml') -Raw
-if ($toml -notmatch '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
-    Write-Output 'FAIL: 从根 Cargo.toml 读不到版本号'
-    exit 1
+# 版本号：Windows 端有独立发版号时（用户 2026-11-23 定 Windows 端 0.21.0），
+# scripts/windows/VERSION 优先；没有该文件时回落到根 Cargo.toml（与安卓/整体一致）。
+$verFile = Join-Path $PSScriptRoot 'VERSION'
+if (Test-Path -LiteralPath $verFile) {
+    $version = (Get-Content -LiteralPath $verFile -Raw).Trim()
+    if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+        Write-Output 'FAIL: scripts/windows/VERSION 不是 X.Y.Z'
+        exit 1
+    }
+} else {
+    $toml = Get-Content (Join-Path $root 'Cargo.toml') -Raw
+    if ($toml -notmatch '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
+        Write-Output 'FAIL: 从根 Cargo.toml 读不到版本号'
+        exit 1
+    }
+    $version = $Matches[1]
 }
-$version = $Matches[1]
 
 # 发版前门禁：打安装包前跑跨项目规范检查，FAIL 中止、WARN 只打印。
 # 为什么放在读出 $version 之后：C1.5 要按版本号只校验本次要发的包，历史目录归存量。
