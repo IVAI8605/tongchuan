@@ -10,7 +10,7 @@
 - 新增（管理页鉴权）：改为密码登录——首次打开要求设置密码（加盐 blake3 迭代 10000 次存 `identity/manage.pwd`，0600、不落明文），之后凭密码登录，会话 Cookie（HttpOnly）；NAS 与 Windows 网页共用同一份 `web.rs`。忘了密码删 `manage.pwd` 重设。
 - 变更（网页 UI）：右上角加「展示二维码」按钮；「信任设备 / 待确认 / 配对」收进可折叠「安全」区块（默认收起）；「历史」与「日志」合并为「记录（历史与日志，近 2 天）」。
 - 变更（安全默认开放）：daemon 默认 `trust_mode` 由 `closed` 改为 `open`（安全功能默认关 = 同网段发现即可传）；网页「安全」区块新增「严格配对模式」开关，打开才切 `closed` 走指纹配对、热生效。旧配置无 `trust_mode` 也按 `open`。
-- 版本：安卓 `1.3.0`（versionCode 10300，从 Cargo 版本读）；Windows 端 `0.21.0`（`scripts/windows/VERSION` 独立版本源，安装器/DisplayVersion 用它）；飞牛 fpk `1.0.1`（`src/fpk` 打包，内含 tc 1.3.0）。
+- 版本：**三端统一 `1.3.0`**（唯一来源根 `Cargo.toml`；安卓 versionName 1.3.0/versionCode 10300、Windows 1.3.0、飞牛 fpk 1.3.0）。删除了 Windows 独立 `scripts/windows/VERSION`，build-fpk 改从 Cargo 读版本。
 - 变更（信任 open 不写表）：`open` 模式只放行、不再把陌生发送方写进信任表（避免信任表堆满 `unknown`）；要按设备管理信任就切 `closed`。
 - fpk 迁移：`cmd/main` 支持首次启动从 `/vol2/1000/好3T/通传接收/.identity-import` 导入旧 `identity.cer/key`+`trust.jsonl`（私钥不进包），实现升级后延续原 NAS 指纹与信任。
 - Windows 端重构（Tauri 2）：从 PowerShell 托盘/ VBS 启动/ 注册表右键的脚本拼装，改为正经桌面应用——原生托盘 + 管理页窗口 + sidecar 拉起 `tc.exe daemon`，NSIS 单安装包（`通传_0.21.0_x64-setup.exe`，4.6MB）。关窗缩托盘不影响接收，托盘菜单：打开管理页/重启接收/退出。

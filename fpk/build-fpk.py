@@ -27,7 +27,15 @@ import tarfile
 import zlib
 
 APP_NAME = "tongchuan"
-APP_VERSION = "1.0.1"
+# 版本号唯一来源：根 Cargo.toml（三端统一）。仅改版号、无代码改动时可跳过测试。
+def _cargo_version():
+    import re as _re
+    src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # fpk -> src
+    txt = open(os.path.join(src, "Cargo.toml"), encoding="utf-8").read()
+    m = _re.search(r'(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', txt)
+    return m.group(1) if m else "0.0.0"
+
+APP_VERSION = os.environ.get("TC_FPK_VERSION") or _cargo_version()
 DISPLAY_NAME = "通传 · 局域网互传"
 WEB_PORT = 53319          # 管理页端口（桌面入口指向它）
 XFER_PORT = 53318         # 传输端口（TCP+UDP）
