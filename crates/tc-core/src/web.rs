@@ -62,7 +62,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
 </head>
 <body>
 <div class="wrap">
-<header><h1>通传</h1><span class="version" id="ver">加载中</span></header>
+<header><h1>通传</h1><span class="version" id="ver">加载中</span><span style="margin-left:auto"></span><button id="qrTop" title="展示本机配对二维码">展示二维码</button></header>
 
 <section>
   <h2>概览</h2>
@@ -113,38 +113,44 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
 </section>
 
 <section>
-  <h2>历史（2 天）</h2>
+  <h2>记录（历史与日志，近 2 天）</h2>
   <table><thead><tr><th>时间</th><th>来源</th><th>落点</th><th>文件数</th><th>字节</th><th>结果</th></tr></thead><tbody id="history"><tr><td colspan="6" class="empty">暂无</td></tr></tbody></table>
+  <h3 style="margin-top:18px">运行日志</h3>
+  <pre id="logs">加载中</pre>
 </section>
 
 <section>
-  <h2>信任设备</h2>
-  <p class="hint" id="trustMode">加载中</p>
-  <table><thead><tr><th>别名</th><th>指纹</th><th>来源</th><th>首次批准</th><th>操作</th></tr></thead><tbody id="trust"><tr><td colspan="5" class="empty">加载中</td></tr></tbody></table>
-  <h3>待确认设备</h3>
-  <p class="hint">closed 模式下被拒绝、尚未批准的来源设备会出现在这里；批准后从列表消失。</p>
-  <table><thead><tr><th>来源设备</th><th>指纹</th><th>最近尝试</th><th>原因</th><th>操作</th></tr></thead><tbody id="pending"><tr><td colspan="5" class="empty">加载中</td></tr></tbody></table>
-  <div class="row mt">
-    <div class="item"><span class="label">手动批准指纹</span><input type="text" id="newFp" placeholder="64 位十六进制指纹"></div>
-    <div class="item"><span class="label">别名</span><input type="text" id="newAlias" placeholder="可选，如 客厅笔记本"></div>
-    <button id="approve">批准</button>
+  <h2 style="display:flex;align-items:center;gap:10px">安全
+    <button id="secToggle" style="margin-left:auto;background:var(--accent-soft);color:var(--ink);border:1px solid var(--line)">展开</button>
+  </h2>
+  <p class="hint">默认关闭：同网段能搜到就能传，无需配对。需要严格指纹配对时，展开这里管理信任设备与配对二维码。</p>
+  <div id="secBody" style="display:none">
+    <div class="row"><label><input type="checkbox" id="strictMode"> 严格配对模式（开启后需指纹/配对；关闭则同网段发现即可传，默认关闭）</label></div>
+    <h3>信任设备</h3>
+    <p class="hint" id="trustMode">加载中</p>
+    <table><thead><tr><th>别名</th><th>指纹</th><th>来源</th><th>首次批准</th><th>操作</th></tr></thead><tbody id="trust"><tr><td colspan="5" class="empty">加载中</td></tr></tbody></table>
+    <h3>待确认设备</h3>
+    <p class="hint">closed 模式下被拒绝、尚未批准的来源设备会出现在这里；批准后从列表消失。</p>
+    <table><thead><tr><th>来源设备</th><th>指纹</th><th>最近尝试</th><th>原因</th><th>操作</th></tr></thead><tbody id="pending"><tr><td colspan="5" class="empty">加载中</td></tr></tbody></table>
+    <div class="row mt">
+      <div class="item"><span class="label">手动批准指纹</span><input type="text" id="newFp" placeholder="64 位十六进制指纹"></div>
+      <div class="item"><span class="label">别名</span><input type="text" id="newAlias" placeholder="可选，如 客厅笔记本"></div>
+      <button id="approve">批准</button>
+    </div>
+    <p class="hint" id="trustMsg">信任表只追加事件，撤销不会删除历史行；撤销后下一场会话即按新状态判定。</p>
+    <h3 style="margin-top:18px">配对（扫码）</h3>
+    <p class="hint">让对方用手机「扫二维码」直接配对，扫完就能发文件，不必再在信任表里手动批准。</p>
+    <div class="row">
+      <div class="item" style="flex:1"><span class="label">本机地址（自动判断，多网卡时改成对方能连到的那个）</span><input type="text" id="pairAddr" style="width:100%" placeholder="例如 192.168.1.23:53318"></div>
+      <button id="pairGen">生成二维码</button>
+      <button id="pairRevoke">立即作废</button>
+    </div>
+    <div id="pairBox" class="mt" style="display:none">
+      <div id="pairQr" style="width:224px;height:224px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px"></div>
+      <p class="hint" id="pairInfo">—</p>
+    </div>
+    <p class="hint" id="pairMsg">尚未生成二维码。有效期 10 分钟，只能配一台设备；关闭本页不影响它继续可用。</p>
   </div>
-  <p class="hint" id="trustMsg">信任表只追加事件，撤销不会删除历史行；撤销后下一场会话即按新状态判定。</p>
-</section>
-
-<section>
-  <h2>配对（扫码）</h2>
-  <p class="hint">让对方用手机「扫二维码」直接配对，扫完就能发文件，不必再在信任表里手动批准。</p>
-  <div class="row">
-    <div class="item" style="flex:1"><span class="label">本机地址（自动判断，多网卡时改成对方能连到的那个）</span><input type="text" id="pairAddr" style="width:100%" placeholder="例如 192.168.1.23:53318"></div>
-    <button id="pairGen">生成二维码</button>
-    <button id="pairRevoke">立即作废</button>
-  </div>
-  <div id="pairBox" class="mt" style="display:none">
-    <div id="pairQr" style="width:224px;height:224px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px"></div>
-    <p class="hint" id="pairInfo">—</p>
-  </div>
-  <p class="hint" id="pairMsg">尚未生成二维码。有效期 10 分钟，只能配一台设备；关闭本页不影响它继续可用。</p>
 </section>
 
 <section>
@@ -157,10 +163,6 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
   <p class="hint" id="saveMsg">修改后立即生效，写入配置文件。</p>
 </section>
 
-<section>
-  <h2>日志（2 天）</h2>
-  <pre id="logs">加载中</pre>
-</section>
 </div>
 <script>
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -415,6 +417,11 @@ document.getElementById('pairRevoke').addEventListener('click',function(){
       fill('pairMsg',j.ok?'二维码已作废，任何人都不能再凭它配对':'作废失败')
     }).catch(function(){fill('pairMsg','请求失败')})
 })
+document.getElementById('secToggle').addEventListener('click',function(){var b=document.getElementById('secBody');var open=b.style.display!=='none';b.style.display=open?'none':'';this.textContent=open?'展开':'收起'});
+document.getElementById('qrTop').addEventListener('click',function(){var b=document.getElementById('secBody');b.style.display='';document.getElementById('secToggle').textContent='收起';if(!document.getElementById('pairQr').innerHTML){document.getElementById('pairGen').click()}setTimeout(function(){var pb=document.getElementById('pairBox');if(pb)pb.scrollIntoView({behavior:'smooth',block:'center'})},150)});
+var _sm=document.getElementById('strictMode');
+if(_sm){fetch('/api/settings').then(function(r){return r.json()}).then(function(j){_sm.checked=(j.trust_mode==='closed')}).catch(function(){});
+_sm.addEventListener('change',function(){fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({trustMode:_sm.checked?'closed':'open'})}).then(function(r){return r.json()}).then(function(){fill('trustMode','模式：'+(_sm.checked?'严格配对（closed）':'开放（open，发现即可传）'))}).catch(function(){})});}
 status();history();logs();trust();loadTargets();sendStatus();pairLoad()
 setInterval(status,3000);setInterval(function(){history();logs();trust()},10000);setInterval(sendStatus,1000)
 </script>
@@ -1544,7 +1551,7 @@ mod tests {
         let (code, _, body) = call(&st, "GET", "/api/trust", b"", "fp", &lim);
         assert_eq!(code, 200);
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["mode"], "closed");
+        assert_eq!(v["mode"], "open");
         assert_eq!(v["peers"].as_array().unwrap().len(), 0);
 
         // 接口批准后下一次 GET 就要看到；撤销后同理，不依赖重启

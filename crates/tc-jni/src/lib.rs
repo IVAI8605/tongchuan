@@ -1180,7 +1180,8 @@ mod tests {
             "log_dir": dir.join("logs"),
             "queue_dir": dir.join("queue"),
             "log_days": 2,
-            "auto_accept": true
+            "auto_accept": true,
+            "trust_mode": "closed"
         });
         let id = start_receiver(&cfg.to_string()).unwrap();
         let identity = Identity::load_or_create(&id_dir).unwrap();
@@ -1293,7 +1294,8 @@ mod tests {
             "log_dir": dir.join("logs"),
             "queue_dir": dir.join("queue"),
             "log_days": 2,
-            "auto_accept": true
+            "auto_accept": true,
+            "trust_mode": "closed"
         });
         let id = start_receiver(&cfg.to_string()).unwrap();
         let identity = Identity::load_or_create(&id_dir).unwrap();
