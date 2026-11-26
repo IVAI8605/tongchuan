@@ -480,27 +480,15 @@ impl PartFile {
         }
         let file = self.ensure_file()?;
         file.seek(SeekFrom::Start(0))?;
-        let (root, blocks) = hash_reader(file)?;
+        let (root, _) = hash_reader(file)?;
         if root != entry.blake3 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "root hash mismatch",
             ));
         }
-        if blocks.len() != entry.block_hashes.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "block count mismatch",
-            ));
-        }
-        for (i, (got, want)) in blocks.iter().zip(&entry.block_hashes).enumerate() {
-            if got != want {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("block {i} hash mismatch"),
-                ));
-            }
-        }
+        // 走到这里说明 entry.block_hashes 为空（极老发送端），root 哈希已覆盖全部内容。
+        // 不能再拿 blocks 与空的 entry.block_hashes 比块数/逐块比——非空文件必然失败。
         Ok(())
     }
 
@@ -729,6 +717,29 @@ mod tests {
             blake3,
             block_hashes,
         }
+    }
+
+    /// 极老发送端的清单没有块哈希：整文件 root 校验必须过，不能被「块数对不上 entry.block_hashes」误杀。
+    #[test]
+    fn verify_accepts_legacy_entry_without_block_hashes() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("tc-store-legacy-{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("legacy.bin.tcpart");
+        let size = BLOCK_SIZE as u64 + 10;
+        let mut entry = sample_entry(size);
+        entry.block_hashes.clear();
+        let data = vec![7u8; size as usize];
+
+        let mut p = PartFile::open(&dest, &entry).unwrap();
+        assert_eq!(p.missing().len(), 2);
+        p.write_block(0, &data[..BLOCK_SIZE as usize]).unwrap();
+        p.write_block(1, &data[BLOCK_SIZE as usize..]).unwrap();
+        p.verify(&entry)
+            .expect("无块哈希的老发送端，root 一致就该校验通过");
     }
 
     #[test]

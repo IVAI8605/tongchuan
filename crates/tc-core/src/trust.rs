@@ -358,8 +358,9 @@ fn append_line(path: &Path, ev: &TrustEvent) -> io::Result<()> {
     }
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
     let line = serde_json::to_string(ev).map_err(|e| io::Error::other(e.to_string()))?;
-    // 一次 writeln 落一整行：宁可报错，也不留下半行污染后面的回放
-    writeln!(f, "{line}")?;
+    // 正文与换行拼成一个缓冲区，一次 write_all 落盘：O_APPEND 只保单次 write 原子，
+    // writeln! 拆成正文+\n 两次 write，并发追加会把别的行插进中间，整行 JSON 被拼坏。
+    f.write_all(format!("{line}\n").as_bytes())?;
     f.flush()
 }
 
@@ -445,4 +446,62 @@ fn platform_default() -> Option<PathBuf> {
         .ok()
         .filter(|v| !v.trim().is_empty())
         .map(|v| PathBuf::from(v).join(".local/share/tongchuan/identity"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    /// daemon 与 CLI 同时追加 trust.jsonl：每行必须是完整 JSON，回放一条不丢、坏行为 0。
+    /// writeln! 把正文和换行拆成两次 write，O_APPEND 只保单次原子，这里专测这个交错。
+    #[test]
+    fn concurrent_append_keeps_every_event_intact() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("tc-trust-append-{unique}"));
+        let path = dir.join(TRUST_FILE);
+        let threads = 16usize;
+        let per_thread = 300usize;
+        let total = threads * per_thread;
+
+        let mut handles = Vec::new();
+        for t in 0..threads {
+            let path = path.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..per_thread {
+                    let n = t * per_thread + i;
+                    let ev = TrustEvent {
+                        ts: 1_700_000_000 + n as i64,
+                        op: "add".into(),
+                        fp: format!("{n:064x}"),
+                        alias: format!("并发设备-{t}-{i}"),
+                        name: String::new(),
+                        platform: String::new(),
+                        by: "test".into(),
+                        note: String::new(),
+                    };
+                    append_line(&path, &ev).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let text = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), total, "并发追加不能丢行");
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                serde_json::from_str::<TrustEvent>(line).is_ok(),
+                "第 {i} 行不是完整 JSON，被别的写入插坏了：{line}"
+            );
+        }
+        let store = TrustStore::new(&dir);
+        assert_eq!(store.bad_lines().unwrap(), 0, "回放不应出现坏行");
+        assert_eq!(store.list().unwrap().len(), total, "回放后事件条数应完整");
+    }
 }

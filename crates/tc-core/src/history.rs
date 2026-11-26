@@ -87,7 +87,8 @@ pub fn record(dir: &Path, rec: &SendRecord) -> io::Result<PathBuf> {
     let path = dir.join(FILE_NAME);
     let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
     let line = serde_json::to_string(rec).map_err(|e| io::Error::other(e.to_string()))?;
-    writeln!(f, "{line}")?;
+    // 一次 write_all 落整行：writeln! 的正文+\n 两次 write 会与同时写的进程交错
+    f.write_all(format!("{line}\n").as_bytes())?;
     f.flush()?;
     Ok(path)
 }

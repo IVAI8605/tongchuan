@@ -2091,7 +2091,16 @@ fn handle_session(
             return Err(io_err(reason));
         }
     };
-    let layout = plan_layout(&dest, &manifest, root_map)?;
+    // 恶意清单被路径校验拒绝时，先回一句 Busy 说明原因再断开；
+    // 否则发送端只看到 EOF，会当成网络抖动反复重试一个永远不可能成功的请求。
+    let layout = match plan_layout(&dest, &manifest, root_map) {
+        Ok(layout) => layout,
+        Err(e) => {
+            let reason = e.to_string();
+            let _ = write_message(ctrl, &Control::Busy { reason });
+            return Err(e);
+        }
+    };
 
     // 增量同步：目标位置上已经是同一份内容的文件不再请求数据块。
     // 必须在 ACK 之前算出来——发送端就是按 accepted_file_ids 决定「哪些文件不用回数据」。
@@ -2800,5 +2809,72 @@ mod tests {
             cache.get_mut(i as u64, p).unwrap();
             assert!(cache.open_count() <= 4);
         }
+    }
+
+    /// 恶意清单被路径校验拒绝时，必须先回 Busy 给出原因，不能只回 EOF 让发送端瞎重试。
+    #[test]
+    fn malicious_manifest_replies_busy_instead_of_eof() {
+        use std::net::TcpStream;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dest = std::env::temp_dir().join(format!("tc-session-reject-{unique}"));
+        fs::create_dir_all(&dest).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dst = dest.clone();
+        let receiver = thread::spawn(move || {
+            let acc = PlainAccepter { listener };
+            run_receiver_with(&acc, &dst, None, None, &HashMap::new()).map_err(|e| e.to_string())
+        });
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write_message(
+            &mut stream,
+            &Control::Hello {
+                txn_id: "txn-reject".into(),
+                device: local_device(),
+                pair_code: None,
+                version: PROTOCOL_VERSION.into(),
+                block_size: BLOCK_SIZE as u32,
+                caps: Vec::new(),
+            },
+        )
+        .unwrap();
+        let ack: Control = read_message(&mut stream).unwrap();
+        assert!(matches!(ack, Control::HelloAck { .. }), "{ack:?}");
+
+        // 根目录名带 ../，plan_layout 的路径校验必须拒绝
+        let manifest = Manifest {
+            txn_id: "txn-reject".into(),
+            device: local_device(),
+            roots: vec![crate::manifest::Root {
+                id: "r0".into(),
+                name: "../escape".into(),
+                mode: "send".into(),
+                dirs: Vec::new(),
+            }],
+            files: Vec::new(),
+            total_bytes: 0,
+            total_files: 0,
+        };
+        write_message(
+            &mut stream,
+            &Control::Manifest {
+                manifest,
+                force: false,
+                dest_id: None,
+            },
+        )
+        .unwrap();
+
+        let reply: Control = read_message(&mut stream).expect("被拒时应回 Busy，而不是 EOF");
+        match reply {
+            Control::Busy { reason } => assert!(!reason.is_empty(), "Busy 应带可读原因"),
+            other => panic!("期望 Busy，实际 {other:?}"),
+        }
+        assert!(receiver.join().unwrap().is_err(), "接收端应拒绝恶意清单");
     }
 }

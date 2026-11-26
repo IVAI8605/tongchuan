@@ -406,7 +406,8 @@ impl DaemonState {
             .append(true)
             .open(&self.log_path)
         {
-            let _ = writeln!(f, "{ts}\t{level}\t{msg}");
+            // 一次 write_all 落整行：writeln! 拆两次 write，和 CLI 同时写会插坏行
+            let _ = f.write_all(format!("{ts}\t{level}\t{msg}\n").as_bytes());
         }
         // 写完再判断大小：轮转点落在整行之后，归档文件不会切出半行
         self.rotate_if_needed();

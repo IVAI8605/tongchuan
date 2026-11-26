@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -123,9 +123,9 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
   <h2 style="display:flex;align-items:center;gap:10px">安全
     <button id="secToggle" style="margin-left:auto;background:var(--accent-soft);color:var(--ink);border:1px solid var(--line)">展开</button>
   </h2>
-  <p class="hint">默认关闭：同网段能搜到就能传，无需配对。需要严格指纹配对时，展开这里管理信任设备与配对二维码。</p>
+  <p class="hint">默认开启严格配对（closed，需配对/批准）：陌生设备需批准后才能写入。展开这里管理信任设备与配对二维码。</p>
   <div id="secBody" style="display:none">
-    <div class="row"><label><input type="checkbox" id="strictMode"> 严格配对模式（开启后需指纹/配对；关闭则同网段发现即可传，默认关闭）</label></div>
+    <div class="row"><label><input type="checkbox" id="strictMode"> 严格配对模式（默认开启：closed，需指纹/配对；关闭则同网段发现即可传，仅限自用侧载）</label></div>
     <h3 style="margin-top:8px">发送时配对码（可选）</h3>
     <div class="row"><div class="item" style="flex:1"><span class="label">配对码</span><input type="text" id="sendPair" placeholder="对端要求配对码时才填，仅本次使用"></div></div>
     <h3>信任设备</h3>
@@ -973,7 +973,10 @@ fn handle(
 
     // 设置密码 / 登录：两个不需要既有会话的入口
     if method == "POST" && path == "/api/setup" {
-        return handle_setup(stream, state, auth, &body);
+        // 首启密码必须由本人在本机设置：管理页绑定 0.0.0.0，同网段谁先访问谁就能占位。
+        // peer_addr 取不到就按非本机处理（fail closed）。
+        let peer = stream.peer_addr().ok();
+        return handle_setup(stream, state, auth, &body, peer);
     }
     if method == "POST" && path == "/api/login" {
         return handle_login(stream, state, auth, &body);
@@ -1004,13 +1007,24 @@ fn handle(
     write_response(&mut stream, code, ctype, &payload, None)
 }
 
-/// 设置密码：仅当尚未设置时可调用，成功即建立会话。
+/// 首启设置密码：只接受来自 127.0.0.1 / ::1 的连接，且仅当尚未设置时可调用。
+/// 成功即建立会话；设完密码后这个入口自动关闭（由 pwd_is_set 分支保证）。
 fn handle_setup(
     mut stream: TcpStream,
     state: &Arc<DaemonState>,
     auth: &WebAuth,
     body: &[u8],
+    peer: Option<SocketAddr>,
 ) -> io::Result<()> {
+    if !peer.is_some_and(peer_is_local) {
+        return write_response(
+            &mut stream,
+            403,
+            "application/json",
+            r#"{"ok":false,"reason":"仅允许本机设置管理密码"}"#.as_bytes(),
+            None,
+        );
+    }
     if auth.pwd_is_set() {
         return write_response(
             &mut stream,
@@ -1035,6 +1049,14 @@ fn handle_setup(
     let cookie = format!("manage_session={sid}; Path=/; HttpOnly; SameSite=Strict");
     state.log("info", "管理页已设置密码");
     write_response(&mut stream, 200, "application/json", r#"{"ok":true}"#.as_bytes(), Some(&cookie))
+}
+
+/// 只认本机回环地址：127.0.0.1 / ::1。不把 127.0.0.0/8 整个段或网卡地址算本机。
+fn peer_is_local(addr: SocketAddr) -> bool {
+    match addr {
+        SocketAddr::V4(v4) => *v4.ip() == Ipv4Addr::LOCALHOST,
+        SocketAddr::V6(v6) => *v6.ip() == Ipv6Addr::LOCALHOST,
+    }
 }
 
 /// 登录：校验密码，成功建立会话。
@@ -1099,6 +1121,7 @@ fn write_response(
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         409 => "Conflict",
         429 => "Too Many Requests",
         _ => "Not Found",
@@ -1735,5 +1758,68 @@ mod tests {
         assert!(!PAGE.contains("100vw"));
         assert!(!PAGE.contains("<script src"));
         assert!(!PAGE.contains("https://"));
+    }
+
+    /// 首启设置密码只能从本机发起：同网段任何人都能抢先设密码，等于拿到写盘/批准指纹的权限。
+    #[test]
+    fn setup_only_accepts_loopback_peer() {
+        // 判定函数只认 127.0.0.1 / ::1，不把整个 127.0.0.0/8 或网卡地址算本机
+        assert!(peer_is_local(SocketAddr::from(([127, 0, 0, 1], 53319))));
+        assert!(peer_is_local(SocketAddr::from((Ipv6Addr::LOCALHOST, 53319))));
+        assert!(!peer_is_local(SocketAddr::from(([192, 168, 95, 18], 53319))));
+        assert!(!peer_is_local(SocketAddr::from(([127, 0, 0, 2], 53319))));
+        assert!(!peer_is_local(SocketAddr::from(([8, 8, 8, 8], 53319))));
+
+        let dir = std::env::temp_dir().join(format!("tc-setup-peer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let auth = WebAuth::new(&dir);
+        let (st, _) = fixture("setup-peer");
+        let body = br#"{"password":"hunter2"}"#;
+
+        // 非本地对端：即使尚未设置密码也必须拒绝，且密码不能被设上
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        handle_setup(
+            server,
+            &st,
+            &auth,
+            body,
+            Some(SocketAddr::from(([192, 168, 95, 18], 44444))),
+        )
+        .unwrap();
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).unwrap();
+        assert!(reply.starts_with("HTTP/1.1 403 "), "{reply}");
+        assert!(reply.contains("仅允许本机"), "{reply}");
+        assert!(!auth.pwd_is_set(), "非本地请求不能设上密码");
+
+        // 本机对端：正常设置密码
+        let listener2 = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port2 = listener2.local_addr().unwrap().port();
+        let mut client2 = TcpStream::connect(("127.0.0.1", port2)).unwrap();
+        let (server2, _) = listener2.accept().unwrap();
+        let peer = server2.peer_addr().unwrap();
+        handle_setup(server2, &st, &auth, body, Some(peer)).unwrap();
+        let mut reply2 = String::new();
+        client2.read_to_string(&mut reply2).unwrap();
+        assert!(reply2.starts_with("HTTP/1.1 200 "), "{reply2}");
+        assert!(auth.pwd_is_set(), "本机请求应能设置密码");
+    }
+
+    /// 安全区文案必须和 Config::default() 的 closed 一致，不能说成「默认关闭」。
+    #[test]
+    fn security_copy_matches_closed_default() {
+        assert_eq!(Config::default().trust_mode, "closed");
+        assert!(
+            PAGE.contains("默认开启严格配对（closed，需配对/批准）"),
+            "安全区应说明默认 closed"
+        );
+        assert!(
+            !PAGE.contains("默认关闭：同网段能搜到就能传"),
+            "旧文案与默认 closed 相反"
+        );
+        assert!(!PAGE.contains("默认关闭）"), "严格配对模式不能写成默认关闭");
     }
 }
