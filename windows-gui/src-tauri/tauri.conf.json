@@ -1,12 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "通传",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "identifier": "com.tongchuan.desktop",
   "build": {
     "frontendDist": "../web"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [],
     "security": { "csp": null }
   },

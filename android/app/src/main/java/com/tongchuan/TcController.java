@@ -65,6 +65,8 @@ public class TcController {
 
     /** 启停是异步的：这段时间内不要用真实状态覆盖「正在启动/停止…」 */
     private volatile boolean recvPending;
+    /** v1.4.1：上一轮是否正在接收；用于在「接收结束」这一拍刷新「最近接收」列表 */
+    private volatile boolean wasReceiving;
     private volatile boolean sendPaused;
     /** 用户点了取消：当前会话会被中断，后面排队的其它目标也不再开始 */
     private volatile boolean sendAborted;
@@ -1444,14 +1446,27 @@ public class TcController {
     }
 
     public void openReceived(File f) {
+        if (f == null || !f.exists()) {
+            // 接收目录被系统清理/用户挪走时，先别报「找不到应用」，直接刷新列表
+            toast("文件已经不在接收目录里了，刷新一下列表看看");
+            refreshRecent();
+            return;
+        }
+        Uri uri = FileServeProvider.uriFor(activity, f);
+        String type = activity.getContentResolver().getType(uri);
+        if (type == null || type.isEmpty()) {
+            type = "*/*";
+        }
+        Intent i = new Intent(Intent.ACTION_VIEW);
+        i.setDataAndType(uri, type);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try {
-            Uri uri = FileServeProvider.uriFor(activity, f);
-            Intent i = new Intent(Intent.ACTION_VIEW);
-            i.setDataAndType(uri, activity.getContentResolver().getType(uri));
-            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             activity.startActivity(i);
+        } catch (android.content.ActivityNotFoundException e) {
+            // 没有任何应用认领这个类型时明确告知，而不是吞掉异常让人以为点了没反应
+            toast("没有能打开「" + f.getName() + "」的应用，可以先把文件移到「下载」再试");
         } catch (Exception e) {
-            toast("没有能打开这个文件的应用");
+            toast("打开失败：" + e.getMessage());
         }
     }
 
@@ -1634,6 +1649,11 @@ public class TcController {
             ui.setRecvProgress(0);
             ui.setRecvSpeedText("");
             ui.setRecvProgressText("");
+            // v1.4.1：接收刚结束就把列表刷新出来，不用等用户点通知回应用
+            if (wasReceiving) {
+                wasReceiving = false;
+                refreshRecent();
+            }
             return;
         }
         String p = TcNative.recvProgress();
@@ -1645,6 +1665,14 @@ public class TcController {
             JSONObject o = new JSONObject(p);
             boolean active = o.optBoolean("active", false);
             ui.setRecvReceiving(active);
+            // v1.4.1：从「在收」变「收完」的那一拍刷新「最近接收」。
+            // 原来只有 onResume/refreshAll 会扫目录，前台收完文件列表一直是旧的。
+            if (active) {
+                wasReceiving = true;
+            } else if (wasReceiving) {
+                wasReceiving = false;
+                refreshRecent();
+            }
             if (active) {
                 ui.setRecvProgress(o.optInt("percent", 0));
                 long br = o.optLong("bytesReceived");

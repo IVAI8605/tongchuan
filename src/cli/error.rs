@@ -1,11 +1,16 @@
 use std::io;
 
 /// 错误分类：AI 靠退出码区分「命令写错」「被对端拒绝」「配置错」「运行失败」。
+///
+/// v1.4.1 现状：`PeerRejected`(3) 与 `Config`(4) 只有映射与单测，命令路由还没有接上，
+/// 实际只会出现 0 / 1 / 2。保留这两个变体是为了将来接线时不破坏调用方的映射表，
+/// 但注释不能再写成「已经生效」——文档与实际不一致比多两个变体更糟。
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum CliError {
     Usage(String),    // exit 2：unknown command/option、缺参、数值范围
-    PeerRejected(String), // exit 3：对端 BUSY/untrusted/版本不兼容
-    Config(String),   // exit 4：配置解析失败、白名单不含落点
+    PeerRejected(String), // exit 3：对端 BUSY/untrusted/版本不兼容（预留，未接线）
+    Config(String),   // exit 4：配置解析失败、白名单不含落点（预留，未接线）
     Io(io::Error),    // exit 1：其余运行错误
 }
 

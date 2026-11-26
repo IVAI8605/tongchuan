@@ -138,8 +138,8 @@ fn default_output_is_unchanged_text() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(!text.trim().starts_with('{'), "默认输出不应是 JSON");
     assert!(text.trim().chars().all(|c| c.is_ascii_digit() || c == '.'), "默认应为纯版本号");
-    // 硬编码证明升版生效：v1.4.0 是新 CLI 能力的交付版本
-    assert_eq!(text.trim(), "1.4.0", "版本应升到 1.4.0");
+    // 与包版本对齐（不写死数字：每次升版都要改测试会把「版本唯一来源」变成两处）
+    assert_eq!(text.trim(), env!("CARGO_PKG_VERSION"), "版本应与包版本一致");
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn version_flag_prints_only_version_and_exits_zero() {
     let out = bin().arg("--version").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "--version 应 exit 0");
     let text = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(text.trim(), "1.4.0", "--version 只应打版本号: {text}");
+    assert_eq!(text.trim(), env!("CARGO_PKG_VERSION"), "--version 只应打版本号: {text}");
     assert!(!text.contains("【传输】"), "--version 不应打总帮助: {text}");
 }
 

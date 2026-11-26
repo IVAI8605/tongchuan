@@ -58,6 +58,12 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
 .row{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
 .hint{color:var(--muted);font-size:13px;margin-top:10px}
 .empty{color:var(--muted);font-size:14px}
+/* v1.4.1：拖入的路径列表 */
+#dropList{list-style:none;margin:0;padding:0}
+#dropList li{display:flex;align-items:center;gap:8px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);margin-top:6px;font-size:14px;overflow-wrap:anywhere}
+#dropList li span{flex:1;min-width:0}
+#dropList li button{background:var(--surface);color:var(--muted);border:1px solid var(--line);padding:2px 10px;font-size:13px}
+#dropWrap.dragover{border-color:var(--accent);background:var(--accent-soft)}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -92,6 +98,11 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
     <div class="item" style="flex:1"><span class="label">强制重传</span>
       <label><input type="checkbox" id="sendForce"> 忽略接收端已有文件，本次全部重传（同名旧文件改名让位，不删除）</label>
     </div>
+  </div>
+  <div class="mt" id="dropWrap" style="padding:10px 12px;border:1px dashed var(--line);border-radius:8px">
+    <span class="label">拖入的路径（可多个，合并成一次传输）</span>
+    <ul id="dropList"></ul>
+    <p class="empty" id="dropEmpty" style="margin:6px 0 0">把文件 / 文件夹直接拖到窗口里就加到这里；连同上方输入框的路径一起发送。</p>
   </div>
   <div id="browseMask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:50"></div>
   <div id="browse" style="display:none;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(560px,92vw);max-height:82vh;overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;box-shadow:0 18px 50px rgba(0,0,0,.25);z-index:51">
@@ -306,16 +317,46 @@ function closeBrowse(){
   document.getElementById('browse').style.display='none'
   document.getElementById('browseMask').style.display='none'
 }
-function startSend(addr,fp,path,force){
-  lastSend={addr:addr,fp:fp,path:path,force:!!force}
+// v1.4.1：桌面端把拖进窗口的文件/文件夹通过 window.tcDrop 交给页面排队。
+// 没装桌面壳（用浏览器打开管理页）时这个函数不会被调用，页面照旧可用。
+var dropPaths=[]
+function renderDrop(){
+  var el=document.getElementById('dropList'),empty=document.getElementById('dropEmpty')
+  if(!el||!empty)return
+  el.innerHTML=dropPaths.map(function(p,i){
+    return '<li><span title="'+esc(p)+'">'+esc(p)+'</span><button data-drop="'+i+'" title="从待发送里移除">移除</button></li>'
+  }).join('')
+  empty.style.display=dropPaths.length?'none':'block'
+}
+window.tcDrop=function(paths){
+  if(!paths)return
+  if(typeof paths==='string')paths=[paths]
+  var added=0
+  for(var i=0;i<paths.length;i++){
+    var p=String(paths[i]||'').trim()
+    if(!p||dropPaths.indexOf(p)>=0)continue
+    dropPaths.push(p);added++
+  }
+  renderDrop()
+  if(added)fill('sendMsg','已加入 '+added+' 个路径，待发送共 '+dropPaths.length+' 个')
+}
+function startSend(addr,fp,paths,force){
+  if(typeof paths==='string')paths=[paths]
+  lastSend={addr:addr,fp:fp,paths:paths.slice(),force:!!force}
   var pair=document.getElementById('sendPair').value.trim()
-  var payload={to:addr,fp:fp,path:path}
+  var payload={to:addr,fp:fp,paths:paths}
   if(pair)payload.pairCode=pair
   if(force)payload.force=true
   fetch('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(payload)})
     .then(function(r){return r.json()}).then(function(j){
-      fill('sendMsg',j.ok?('已开始发送到 '+addr+'：'+path):('无法开始：'+(j.error||'未知原因')))
+      if(j.ok){
+        fill('sendMsg','已开始发送到 '+addr+'：'+paths.length+' 个路径')
+        dropPaths=[];renderDrop()
+        document.getElementById('sendPath').value=''
+      }else{
+        fill('sendMsg','无法开始：'+(j.error||'未知原因'))
+      }
     }).catch(function(){fill('sendMsg','请求失败')})
 }
 function sendStatus(){
@@ -371,13 +412,21 @@ document.getElementById('browseList').addEventListener('click',function(e){
 })
 document.getElementById('sendGo').addEventListener('click',function(){
   var p=sendPeers[document.getElementById('sendTarget').value]
-  var path=document.getElementById('sendPath').value.trim()
   if(!p){fill('sendMsg','先选一台设备（可点「刷新设备」）');return}
-  if(!path){fill('sendMsg','先选一个目录或文件');return}
-  startSend(p.addr,p.fingerprint,path,document.getElementById('sendForce').checked)
+  // 一批 = 拖入的路径 + 输入框里的那一个（去重），一次会话发完
+  var list=dropPaths.slice()
+  var manual=document.getElementById('sendPath').value.trim()
+  if(manual&&list.indexOf(manual)<0)list.push(manual)
+  if(!list.length){fill('sendMsg','先选一个目录或文件，或把文件拖进窗口');return}
+  startSend(p.addr,p.fingerprint,list,document.getElementById('sendForce').checked)
+})
+document.getElementById('dropList').addEventListener('click',function(e){
+  var b=e.target.closest('button[data-drop]');if(!b)return
+  var i=parseInt(b.getAttribute('data-drop'),10)
+  if(!isNaN(i)&&i>=0){dropPaths.splice(i,1);renderDrop()}
 })
 document.getElementById('sendRetry').addEventListener('click',function(){
-  if(lastSend)startSend(lastSend.addr,lastSend.fp,lastSend.path,lastSend.force)
+  if(lastSend)startSend(lastSend.addr,lastSend.fp,lastSend.paths,lastSend.force)
 })
 // ---- 配对二维码（v0.20）：生成、倒计时、作废 ----
 var pairTimer=null,pairExpires=0
@@ -739,6 +788,31 @@ fn url_decode(s: &str) -> String {
 /// - 没配时 Windows 列盘符（带卷标名），其它平台列 `/`。
 /// 目录与文件分开返回：目录点进去继续翻，文件点一下填进发送框。
 /// 各自截断 500 条，避免文件多的目录把目录本身挤没、或一次刷屏卡住页面。
+/// v1.4.1：`/api/send` 的路径参数兼容两种写法 —— 新的 `paths: [...]` 数组
+/// 与旧的单个 `path: "..."`；空白项直接丢掉，两者都空就交给上层报「没有要发送的路径」。
+fn send_paths_from(v: &serde_json::Value) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(arr) = v.get("paths").and_then(|x| x.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                let s = s.trim();
+                if !s.is_empty() {
+                    out.push(PathBuf::from(s));
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        if let Some(s) = v.get("path").and_then(|x| x.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() {
+                out.push(PathBuf::from(s));
+            }
+        }
+    }
+    out
+}
+
 fn list_dirs(path: &str, roots: &[PathBuf]) -> io::Result<DirListResp> {
     let mut dirs: Vec<String> = Vec::new();
     let mut files: Vec<String> = Vec::new();
@@ -1223,12 +1297,14 @@ fn route(
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            let path = v
-                .get("path")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            // v1.4.1：支持一次发多个路径（桌面端把拖入的文件/目录合成一批）。
+            // 新页面传 `paths` 数组；老脚本只传单个 `path`，两者都收，语义一致。
+            let paths = send_paths_from(&v);
+            let path = match paths.len() {
+                0 => String::new(),
+                1 => paths[0].display().to_string(),
+                n => format!("{n} 个路径"),
+            };
             let fp = v
                 .get("fp")
                 .and_then(|x| x.as_str())
@@ -1245,7 +1321,7 @@ fn route(
             let req = crate::sendjob::SendRequest {
                 to: to.clone(),
                 fingerprint: fp,
-                path: PathBuf::from(&path),
+                paths,
                 pair_code: pair,
                 force,
             };
@@ -1518,6 +1594,31 @@ mod tests {
         lim: &RateLimit,
     ) -> (u16, &'static str, Vec<u8>) {
         route(st, method, path, "", body, fp, lim)
+    }
+
+    #[test]
+    fn send_accepts_paths_array_and_legacy_single_path() {
+        // 纯解析层：数组、单值、空白项、两种写法都给一次
+        let both: serde_json::Value = serde_json::json!({"paths":["a"," ","b"]});
+        assert_eq!(send_paths_from(&both).len(), 2);
+        let legacy: serde_json::Value = serde_json::json!({"path":" c "});
+        assert_eq!(send_paths_from(&legacy).len(), 1);
+        let empty: serde_json::Value = serde_json::json!({"paths":[],"path":""});
+        assert!(send_paths_from(&empty).is_empty());
+
+        // 接口层：一个路径都不给时应当明确拒绝，而不是开始一场空传输
+        let (st, lim) = fixture("send-empty");
+        let (code, _, body) = call(
+            &st,
+            "POST",
+            "/api/send",
+            br#"{"to":"127.0.0.1:53318","paths":[]}"#,
+            "fp-abc",
+            &lim,
+        );
+        assert_eq!(code, 400);
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("没有要发送的路径"), "实际返回：{text}");
     }
 
     #[test]

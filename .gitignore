@@ -60,5 +60,7 @@ tongchuan-target/
 *.exe
 windows-gui/src-tauri/bin/tc.exe
 /windows-gui/src-tauri/target/
+# Tauri 2 每次 check/build 都会重新生成的 ACL schema
+/windows-gui/src-tauri/gen/
 
 __pycache__/

@@ -468,7 +468,10 @@ fn discovery_announce_is_received() {
     let ann = discover::Announcement {
         device: local_device(),
         fingerprint: other_fp.clone(),
-        port: 53318,
+        // 广播端口故意不用 53318：监听侧以「发送方 IP + 公告里的 port」为键，
+        // 本机常驻的桌面守护进程每 3 秒也发一条 port=53318 的回环公告，
+        // 键相同会把本条覆盖掉，导致用例间歇性失败（2026-11-26 在本机复现 1/3）。
+        port: 53399,
         version: "0.2.0".into(),
         ts: queue::now_secs(),
         reply: false,

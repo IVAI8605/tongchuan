@@ -12,7 +12,7 @@ use crate::trust::TrustStore;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
-use std::io::{self, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -854,6 +854,86 @@ impl HandleCache {
     fn open_count(&self) -> usize {
         self.map.len()
     }
+
+    /// 读失败后把句柄扔掉：重新 open 才能摆脱坏掉的文件状态（休眠盘醒来后常见）
+    fn invalidate(&mut self, id: u64) {
+        self.map.remove(&id);
+        if let Some(pos) = self.order.iter().position(|x| *x == id) {
+            self.order.remove(pos);
+        }
+    }
+}
+
+/// v1.4.1：机械硬盘休眠时，第一块往往要等盘起转（十几秒），
+/// 而且按文件顺序访问时多块盘只能一块一块醒。这里在扫描开始前用后台线程
+/// 并发读每个源路径里的头两个文件，把几块盘的起转时间重叠起来。
+/// 纯 best-effort：读不到、没权限、空目录都直接忽略，不参与任何校验。
+fn prewarm_sources(sources: Vec<PathBuf>) {
+    let targets = prewarm_targets(&sources);
+    if targets.is_empty() {
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name("tc-prewarm".into())
+        .spawn(move || {
+            thread::scope(|s| {
+                for p in targets {
+                    s.spawn(move || {
+                        if let Ok(mut f) = File::open(&p) {
+                            // 读 4 KiB 就足以让盘起转；不读大文件，避免预热反过来拖慢扫描
+                            let mut head = [0u8; 4096];
+                            let _ = f.read(&mut head);
+                        }
+                    });
+                }
+            });
+        });
+}
+
+/// 每个源最多取 2 个文件、总数最多 8 个：够让所属盘转起来，又不至于把目录遍历一遍。
+fn prewarm_targets(sources: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for p in sources {
+        if out.len() >= 8 {
+            break;
+        }
+        if p.is_file() {
+            out.push(p.clone());
+            continue;
+        }
+        collect_head_files(p, 0, 2, &mut out);
+    }
+    out
+}
+
+fn collect_head_files(dir: &Path, depth: usize, want: usize, out: &mut Vec<PathBuf>) {
+    if out.len() >= 8 || depth > 3 {
+        return;
+    }
+    let rd = match fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let mut files = 0usize;
+    for entry in rd.flatten() {
+        if out.len() >= 8 || files >= want {
+            return;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        // 半成品与隐藏文件不预热：它们不是发送源，读到也算白读
+        if name.starts_with('.') || name.ends_with(".tcpart") || name.ends_with(".tcpart.map") {
+            continue;
+        }
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(t) if t.is_file() => {
+                out.push(path);
+                files += 1;
+            }
+            Ok(t) if t.is_dir() => collect_head_files(&path, depth + 1, want, out),
+            _ => {}
+        }
+    }
 }
 
 /// 发送端：控制连接谈清单，数据连接按接收端的 BLOCK_REQ 供块。
@@ -1022,6 +1102,9 @@ pub fn run_sender_with_device_control_opts(
     // 扫描阶段也回报，否则大目录会连续几分钟没有任何界面反馈（本轮实测踩到）
     // v1.1.0：t_all 量整次端到端；t_scan 只量清单扫描，稍后换算 scan_us。
     let t_all = std::time::Instant::now();
+    // v1.4.1：休眠盘先并行起转，后面的扫描与取块都在盘醒着的时候跑。
+    // 扫描本身按文件顺序读，单靠它只能一块盘一块盘地醒。
+    prewarm_sources(paths.to_vec());
     let t_scan = std::time::Instant::now();
     let manifest = {
         let mut scan_cb = |files: u64, bytes: u64| {
@@ -1369,14 +1452,65 @@ fn send_block(
         .sources
         .get(&entry.id)
         .ok_or_else(|| io_err("missing source path"))?;
-    let f = handles.get_mut(file_id, abs)?;
-    f.seek(SeekFrom::Start(block_index as u64 * BLOCK_SIZE as u64))?;
-    let n = read_full_block(f, block_buf)?;
+    // v1.4.1：休眠盘起转期间读会短时失败，交给带退避的重试，别让整场发送中止
+    let n = read_block_with_retry(handles, file_id, abs, block_buf, block_index)?;
     let out = FrameHeader::new(FrameType::BlockData, file_id, block_index);
     write_frame(stream, &out, &block_buf[..n])?;
     shared.blocks.fetch_add(1, Ordering::Relaxed);
     shared.bytes.fetch_add(n as u64, Ordering::Relaxed);
     Ok(entry.rel_path.clone())
+}
+
+/// 休眠盘起转期间 read 可能返回瞬时错误（EIO / 设备未就绪）。
+/// 整场发送不该因为一次读失败就中止，所以丢掉可能坏掉的句柄、退避后重读；
+/// 明确读不出来的错误（文件没了、没权限）立刻上抛，不做无意义等待。
+const BLOCK_READ_RETRIES: u32 = 4;
+
+fn read_block_with_retry(
+    handles: &mut HandleCache,
+    file_id: u64,
+    abs: &Path,
+    buf: &mut [u8],
+    block_index: u32,
+) -> io::Result<usize> {
+    let mut delay = Duration::from_millis(500);
+    let mut last: Option<io::Error> = None;
+    for attempt in 0..=BLOCK_READ_RETRIES {
+        let res = (|| -> io::Result<usize> {
+            let f = handles.get_mut(file_id, abs)?;
+            f.seek(SeekFrom::Start(block_index as u64 * BLOCK_SIZE as u64))?;
+            read_full_block(f, buf)
+        })();
+        match res {
+            Ok(n) => return Ok(n),
+            Err(e) if attempt < BLOCK_READ_RETRIES && transient_read_error(&e) => {
+                handles.invalidate(file_id);
+                eprintln!(
+                    "WARN: 读块失败（{} 第 {} 块，第 {} 次），{}ms 后重试: {e}",
+                    abs.display(),
+                    block_index,
+                    attempt + 1,
+                    delay.as_millis()
+                );
+                thread::sleep(delay);
+                // 盘起转通常在几秒内结束，退避比线性等待更快命中
+                delay = (delay * 3).min(Duration::from_secs(5));
+                last = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| io_err("读块失败")))
+}
+
+fn transient_read_error(e: &io::Error) -> bool {
+    !matches!(
+        e.kind(),
+        io::ErrorKind::NotFound
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::InvalidInput
+            | io::ErrorKind::InvalidData
+    )
 }
 
 /// 进度回调只在主线程那条流上发生：字节与块数取原子总数，因此显示的是全会话进度。
@@ -2727,6 +2861,25 @@ impl DataConn for ChannelData {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// v1.4.1：预热只取少量普通文件（跳过 .tcpart 这类内部文件），单文件源也能取到。
+    #[test]
+    fn prewarm_picks_files_and_skips_partials() {
+        let root = std::env::temp_dir().join(format!("tc-prewarm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("a.txt"), b"x").unwrap();
+        fs::write(root.join("b.tcpart"), b"x").unwrap();
+        fs::write(root.join("sub").join("c.bin"), b"x").unwrap();
+
+        let targets = prewarm_targets(&[root.clone()]);
+        assert_eq!(targets.len(), 2, "应取 2 个普通文件、跳过半成品");
+        assert!(targets.iter().all(|p| !p.to_string_lossy().ends_with(".tcpart")));
+
+        let single = prewarm_targets(&[root.join("a.txt")]);
+        assert_eq!(single.len(), 1, "单文件源也应预热");
+        let _ = fs::remove_dir_all(&root);
+    }
 
     /// v0.15：并行条数必须同时满足「对端声明能力」「工作量够」「非模拟中断」。
     #[test]

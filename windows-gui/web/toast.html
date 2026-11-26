@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>通传</title>
+<style>
+:root{--bg:#f6f5f2;--surface:#fff;--ink:#1d1c1a;--muted:#6d6a64;--line:#dedbd4;--accent:#1f6f5c;
+  --font:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+html,body{margin:0;height:100%;background:transparent;font:14px/1.5 var(--font);color:var(--ink);overflow:hidden}
+#card{box-sizing:border-box;height:100%;background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--accent);
+  border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;justify-content:center;gap:2px;cursor:pointer}
+#title{font-size:13px;color:var(--accent);font-weight:600;letter-spacing:.02em}
+#text{font-size:15px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#hint{font-size:12px;color:var(--muted)}
+#card:hover{background:#fbfaf8}
+</style>
+</head>
+<body>
+<div id="card">
+  <div id="title">收到文件</div>
+  <div id="text">—</div>
+  <div id="hint">点击打开落点文件夹</div>
+</div>
+<script>
+var inv = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) || null;
+function tcToastUpdate(){
+  if(!inv) return;
+  inv('toast_info').then(function(i){
+    if(!i) return;
+    document.getElementById('text').textContent = (i.text && i.text.length) ? i.text : '已收到文件';
+  }).catch(function(){});
+}
+window.tcToastUpdate = tcToastUpdate;
+document.getElementById('card').addEventListener('click', function(){
+  if(inv) inv('open_toast').catch(function(){});
+});
+tcToastUpdate();
+</script>
+</body>
+</html>

@@ -1288,12 +1288,11 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                     cfg.destination.display()
                 ),
             );
-            // 只记录令牌文件位置，不记录令牌本身，避免日志泄露凭据
+            // v1.4.1：v1.3.0 起管理页改用密码登录，这里不能再提示已经不存在的令牌文件
             state.log(
                 "info",
                 &format!(
-                    "管理页需要令牌，文件 {}；首次访问用 http://{}/?t=<令牌> 打开",
-                    cfg.identity_dir.join("manage.token").display(),
+                    "管理页 http://{} 已启用密码登录；首次访问在本机打开设置密码",
                     cfg.manage
                 ),
             );

@@ -5,7 +5,7 @@
 
 ## 版本与协议
 
-- 版本号唯一来源：根 `Cargo.toml` 的 `workspace.package.version`（当前 `1.4.0`；三端同号发，本次代码只改 CLI，Windows / Android / fpk 都按这个唯一来源出 1.4.0 包；协议仍 `0.20`）。
+- 版本号唯一来源：根 `Cargo.toml` 的 `workspace.package.version`（当前 `1.4.1`；三端同号发，Windows / Android / fpk 都按这个唯一来源出 1.4.1 包；协议仍 `0.20`）。
 - 传输协议固定在 `crates/tc-core/src/session.rs` 的 `0.20`，与包版本解耦；门禁只比主次版本，`0.20.x` 各端互通。
 
 ## 目录

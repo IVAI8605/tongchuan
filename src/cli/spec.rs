@@ -17,6 +17,9 @@ pub struct CmdSpec {
     pub args: &'static [ArgSpec],
 }
 
+/// 只在测试里用来核对「定义表与分发实现没有漏项」；生产代码不需要它，
+/// 加 cfg(test) 避免 `cargo build` 的 dead_code 告警。
+#[cfg(test)]
 pub const EXPECTED_NAMES: &[&str] = &[
     "version", "identity", "send", "dests", "history", "diag", "resend", "recv", "daemon",
     "discover", "queue", "flush", "trust",

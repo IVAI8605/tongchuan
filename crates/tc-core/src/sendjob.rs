@@ -21,7 +21,9 @@ use std::thread;
 pub struct SendRequest {
     pub to: String,
     pub fingerprint: Option<String>,
-    pub path: PathBuf,
+    /// v1.4.1：一次可以发多个路径（拖拽进来的一批文件/目录合并成一场传输）。
+    /// 只有一个路径时行为与旧的单 `path` 完全一致，协议侧本来就按 `&[PathBuf]` 收。
+    pub paths: Vec<PathBuf>,
     pub pair_code: Option<String>,
     /// v0.12：忽略接收端已有文件，本次全部重传
     pub force: bool,
@@ -32,12 +34,19 @@ pub fn start(state: Arc<DaemonState>, req: SendRequest) -> io::Result<()> {
     if req.to.trim().is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "目标设备为空"));
     }
-    if !req.path.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("路径不存在：{}", req.path.display()),
-        ));
+    if req.paths.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "没有要发送的路径"));
     }
+    // 逐个确认：拖拽进来的一批里只要有一个不在了，就在开始前说清楚是哪个
+    for p in &req.paths {
+        if !p.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("路径不存在：{}", p.display()),
+            ));
+        }
+    }
+    let paths_text = display_paths(&req.paths);
 
     // 同一时间只跑一个：上一场没结束时直接拒绝，避免两条进度互相覆盖
     let mut slot = state.send_job.lock().expect("send_job poisoned");
@@ -72,7 +81,7 @@ pub fn start(state: Arc<DaemonState>, req: SendRequest) -> io::Result<()> {
 
     let job = SendJob {
         target: req.to.clone(),
-        path: req.path.display().to_string(),
+        path: paths_text.clone(),
         phase: "scanning".into(),
         percent: 0,
         files: 0,
@@ -91,12 +100,22 @@ pub fn start(state: Arc<DaemonState>, req: SendRequest) -> io::Result<()> {
     *slot = Some(job);
     drop(slot);
 
-    let path = req.path.clone();
-    thread::spawn(move || run(state, req, path, fingerprint));
+    let paths = req.paths.clone();
+    thread::spawn(move || run(state, req, paths, fingerprint));
     Ok(())
 }
 
-fn run(state: Arc<DaemonState>, req: SendRequest, path: PathBuf, fingerprint: String) {
+/// 页面/日志里展示一批路径：单个就照旧显示完整路径，多个只报个数，
+/// 避免把十几行路径灌进一行日志。
+fn display_paths(paths: &[PathBuf]) -> String {
+    match paths {
+        [] => String::new(),
+        [one] => one.display().to_string(),
+        many => format!("{} 个路径（首个 {}）", many.len(), many[0].display()),
+    }
+}
+
+fn run(state: Arc<DaemonState>, req: SendRequest, paths: Vec<PathBuf>, fingerprint: String) {
     let identity_dir = {
         let cfg = state.config.lock().expect("config poisoned");
         cfg.identity_dir.clone()
@@ -132,7 +151,7 @@ fn run(state: Arc<DaemonState>, req: SendRequest, path: PathBuf, fingerprint: St
         };
         run_sender_with_device_control_opts(
             &opener,
-            &[path.clone()],
+            &paths,
             req.pair_code.as_deref(),
             crate::manifest::local_device(),
             Some(&mut progress),
@@ -173,7 +192,7 @@ fn run(state: Arc<DaemonState>, req: SendRequest, path: PathBuf, fingerprint: St
             &format!(
                 "管理页发送完成 目标={} 路径={} verdict={} files={} blocks={} 增量跳过={}",
                 req.to,
-                path.display(),
+                display_paths(&paths),
                 r.verdict,
                 r.files,
                 r.blocks_sent,
@@ -185,7 +204,7 @@ fn run(state: Arc<DaemonState>, req: SendRequest, path: PathBuf, fingerprint: St
             &format!(
                 "管理页发送失败 目标={} 路径={}: {e}",
                 req.to,
-                path.display()
+                display_paths(&paths)
             ),
         ),
     }
@@ -197,7 +216,7 @@ fn record_history(req: &SendRequest, result: &io::Result<crate::SendReport>) {
             id: history::new_id(),
             ts: now_secs(),
             to: req.to.clone(),
-            paths: vec![req.path.clone()],
+            paths: req.paths.clone(),
             peer_fp: req.fingerprint.clone(),
             files: r.files,
             bytes: r.bytes,
@@ -212,7 +231,7 @@ fn record_history(req: &SendRequest, result: &io::Result<crate::SendReport>) {
             id: history::new_id(),
             ts: now_secs(),
             to: req.to.clone(),
-            paths: vec![req.path.clone()],
+            paths: req.paths.clone(),
             peer_fp: req.fingerprint.clone(),
             files: 0,
             bytes: 0,
