@@ -1,6 +1,6 @@
 #!/bin/bash
 # 通传 NAS 守护进程在 fnOS 上的生命周期：start / stop / status / restart
-# 由应用中心调用，也可手动 ./cmd/main restart。全部可写落点收进应用数据目录。
+# 由应用中心调用，也可手动 ./cmd/main restart。可写数据全部收进应用数据目录，不写死任何私有卷路径。
 set -u
 APP_NAME="${TRIM_APPNAME:-tongchuan}"
 APP_DIR="${TRIM_APPDEST:-/var/apps/${APP_NAME}}"
@@ -9,14 +9,16 @@ BIN="${APP_DIR}/bin/tc"
 CFG="${DATA_DIR}/config.toml"
 PID_FILE="${DATA_DIR}/daemon.pid"
 OUT="${DATA_DIR}/logs/daemon.out"
+# 默认接收落点：应用数据目录下的 received/。保证可写、不指向任何特定机器的私有卷；
+# 用户可在管理页或 config.toml 把它改到某个共享目录。
+RECV_DEFAULT="${DATA_DIR}/received"
 
-mkdir -p "${DATA_DIR}" "${DATA_DIR}/identity" "${DATA_DIR}/logs" "${DATA_DIR}/queue" 2>/dev/null
+mkdir -p "${DATA_DIR}" "${DATA_DIR}/identity" "${DATA_DIR}/logs" "${DATA_DIR}/queue" "${RECV_DEFAULT}" 2>/dev/null
 
-# 可选：首次启动前从本地卷导入旧设备身份与信任，延续原 NAS 指纹（升级迁移用）。
-# 私钥不进 fpk 包，只在本地卷临时放，导入后把 import 目录改名留档。
-IMPORT_DIR="/vol2/1000/好3T/通传接收/.identity-import"
+# 可选：管理员若把旧设备身份放到 ${DATA_DIR}/.identity-import，首次启动前导入以延续原指纹（升级迁移用）。
+# 私钥不进 fpk 包，只走本机数据目录；导入后把 import 目录改名留档。
+IMPORT_DIR="${DATA_DIR}/.identity-import"
 if [ -d "${IMPORT_DIR}" ] && [ -f "${IMPORT_DIR}/identity.cer" ]; then
-    mkdir -p "${DATA_DIR}/identity"
     cp -f "${IMPORT_DIR}/identity.cer" "${DATA_DIR}/identity/identity.cer" 2>/dev/null
     cp -f "${IMPORT_DIR}/identity.key" "${DATA_DIR}/identity/identity.key" 2>/dev/null
     [ -f "${IMPORT_DIR}/trust.jsonl" ] && cp -f "${IMPORT_DIR}/trust.jsonl" "${DATA_DIR}/identity/trust.jsonl" 2>/dev/null
@@ -26,16 +28,23 @@ if [ -d "${IMPORT_DIR}" ] && [ -f "${IMPORT_DIR}/identity.cer" ]; then
     echo "imported identity from ${IMPORT_DIR}"
 fi
 
-# 首次运行落一份可编辑配置：接收落点、端口都在这里，改完 restart 生效
+# 首次运行落一份可编辑配置：接收落点、端口都在这里，改完 restart 生效。
+# 落点：安装向导里用户选的目录优先（install_callback 写在 .install-destination），否则默认应用数据目录 received/
+DEST="${RECV_DEFAULT}"
+if [ -s "${DATA_DIR}/.install-destination" ]; then
+    _d="$(head -n1 "${DATA_DIR}/.install-destination" 2>/dev/null | sed 's/[[:space:]]*$//')"
+    [ -n "${_d}" ] && DEST="${_d}"
+fi
+[ -d "${DEST}" ] || mkdir -p "${DEST}" 2>/dev/null
 if [ ! -f "${CFG}" ]; then
     cat > "${CFG}" <<CFG
 # 通传守护进程配置（应用中心生成，可直接编辑，改完 ./cmd/main restart 生效）
 alias = "通传NAS"
 listen = "0.0.0.0:53318"
 manage = "0.0.0.0:53319"
-# 接收落点：默认 /vol2/1000/好3T/通传接收（与手工部署一致）。要换就改这里，并让 allow 同步。
-destination = "/vol2/1000/好3T/通传接收"
-allow = ["/vol2/1000/好3T/通传接收"]
+# 接收落点：首次安装时选定的目录（未选则为应用数据目录的 received/）。要改就改这里并让 allow 同步。
+destination = "${DEST}"
+allow = ["${DEST}"]
 identity_dir = "${DATA_DIR}/identity"
 log_dir = "${DATA_DIR}/logs"
 queue_dir = "${DATA_DIR}/queue"
@@ -51,15 +60,19 @@ fi
 
 running() { [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; }
 
+cur_dest() {
+    local d
+    d="$(sed -n 's/^destination[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "${CFG}" 2>/dev/null | head -n1)"
+    echo "${d:-${RECV_DEFAULT}}"
+}
+
 report() {
-    local tok=""
-    [ -r "${DATA_DIR}/identity/manage.token" ] && tok="$(cat "${DATA_DIR}/identity/manage.token")"
     local ip
     ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n1)"
     [ -n "${ip}" ] || ip="NAS的地址"
     echo "  传输端口:   ${ip}:53318（TCP+UDP）"
-    echo "  管理页:     http://${ip}:53319/?t=${tok:-<见 identity/manage.token>}"
-    echo "  接收落点:   /vol2/1000/好3T/通传接收（可在 ${CFG} 里改）"
+    echo "  管理页:     http://${ip}:53319/（首次打开设置管理密码，之后密码登录）"
+    echo "  接收落点:   $(cur_dest)（可在 ${CFG} 或管理页改）"
     echo "  数据目录:   ${DATA_DIR}"
 }
 
@@ -71,8 +84,14 @@ start() {
     nohup "${BIN}" daemon --config "${CFG}" >> "${OUT}" 2>&1 < /dev/null &
     echo $! > "${PID_FILE}"
     local i
-    for i in $(seq 1 15); do
-        if running && [ -r "${DATA_DIR}/identity/manage.token" ]; then break; fi
+    for i in $(seq 1 20); do
+        running || { sleep 1; continue; }
+        # 进程在且端口就绪即算起来（有 curl 就探一下 /api/health，没有就直接放过）
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsS -o /dev/null "http://127.0.0.1:53319/api/health" 2>/dev/null && break
+        else
+            break
+        fi
         sleep 1
     done
     if running; then echo "started (pid $(cat "${PID_FILE}"))"; report; return 0; fi

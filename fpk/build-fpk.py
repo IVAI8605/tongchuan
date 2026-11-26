@@ -14,7 +14,7 @@
       ├── ICON.PNG / ICON_256.PNG   应用中心列表图标
       └── ui/               桌面入口配置与图标
 
-版本号由 APP_VERSION 决定（用户 2026-11-23 定为 1.0.0）。
+版本号取自根 Cargo.toml（三端统一），可用 TC_FPK_VERSION 覆盖。
 产物：<项目根>/dist/tongchuan-<ver>-linux-x64.fpk
 """
 import gzip
@@ -182,7 +182,7 @@ MANIFEST = (
     "appname         = " + APP_NAME + "\n"
     "version         = {ver}\n"
     "display_name    = " + DISPLAY_NAME + "\n"
-    "desc            = <p><b>通传</b>（局域网互传）：电脑、手机与 NAS 之间直接传文件夹，不走云端。</p><p>接收文件默认落在 /vol2/1000/好3T/通传接收；安全功能默认关闭（同网段发现即可传），要严格指纹配对在数据目录 config.toml 里改 trust_mode=closed。</p>\n"
+    "desc            = <p><b>通传</b>（局域网互传）：电脑、手机与 NAS 之间直接传文件夹，不走云端。</p><p>接收文件默认落在应用数据目录的 received/（可在管理页或 config.toml 改到共享目录）；安全功能默认关闭（同网段发现即可传），要严格指纹配对把 trust_mode 改成 closed。</p>\n"
     "arch            = x86_64\n"
     "source          = thirdparty\n"
     "desktop_uidir   = ui\n"
@@ -194,6 +194,9 @@ MANIFEST = (
     "service_port    = " + str(WEB_PORT) + "\n"
     "ctl_stop        = true\n"
     "platform        = \n"
+    "os_min_version  = 1.2.1200\n"
+    "checkport       = true\n"
+    "changelog       = 首次安装可选接收目录；默认落点改为应用数据目录 received/，不再写死私有路径；管理页改密码登录。\n"
     "install_type    = root\n"
     "checksum        = {md5}\n"
 )
@@ -248,6 +251,12 @@ def build():
         tar_add(tf, "ui/images", isdir=True)
         tar_add(tf, "ui/images/64.png", make_icon(64))
         tar_add(tf, "ui/images/256.png", make_icon(256))
+        # 安装向导（首次安装让用户选接收目录）：有 wizard/install 就一起打包
+        wiz = os.path.join(HERE, "wizard", "install")
+        if os.path.exists(wiz):
+            with open(wiz, "rb") as wf:
+                tar_add(tf, "wizard", isdir=True)
+                tar_add(tf, "wizard/install", wf.read())
 
     out_path = os.path.join(OUT, "%s-%s-linux-x64.fpk" % (APP_NAME, APP_VERSION))
     with open(out_path, "wb") as f:
