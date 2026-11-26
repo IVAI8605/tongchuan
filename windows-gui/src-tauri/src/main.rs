@@ -19,7 +19,7 @@ struct Daemon {
     child: Mutex<Option<Child>>,
 }
 
-/// 首次运行在应用数据目录生成 config.toml：落点/端口/信任默认开放（与其余端一致）。
+/// 首次运行在应用数据目录生成 config.toml：落点/端口照默认，信任默认 closed（与其余端一致、不可免鉴权）。
 /// 注意：Windows 路径写进 TOML 时反斜杠会被当转义符（`\U` 报 unicode 错），统一转成正斜杠。
 fn default_config(data: &std::path::Path) -> String {
     let norm = |p: std::path::PathBuf| p.display().to_string().replace('\\', "/");
@@ -35,7 +35,7 @@ fn default_config(data: &std::path::Path) -> String {
          queue_dir = \"{q}\"\n\
          log_days = 2\n\
          log_level = \"info\"\n\
-         trust_mode = \"open\"\n\
+         trust_mode = \"closed\"\n\
          streams = 4\n\
          hash_cache = true\n",
         recv = recv,
@@ -69,6 +69,21 @@ fn start_daemon(app: &tauri::AppHandle, d: &Daemon) -> Result<(), String> {
     Ok(())
 }
 
+/// 启动接收进程失败不能静默：stderr 打一份，应用数据目录的日志也留一份，
+/// 否则用户只看到管理页白屏，无从判断后台 daemon 到底起没起来。
+fn report_start_error(app: &tauri::AppHandle, err: &str) {
+    eprintln!("[通传] 启动接收进程失败: {err}");
+    if let Ok(data) = app.path().app_data_dir() {
+        let dir = data.join("logs");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(
+                dir.join("desktop-startup.log"),
+                format!("启动接收进程失败: {err}\n"),
+            );
+        }
+    }
+}
+
 fn stop_daemon(d: &Daemon) {
     if let Some(mut c) = d.child.lock().unwrap().take() {
         let _ = c.kill();
@@ -98,7 +113,9 @@ fn main() {
         })
         .setup(|app| {
             let handle = app.handle().clone();
-            let _ = start_daemon(&handle, &app.state::<Daemon>());
+            if let Err(e) = start_daemon(&handle, &app.state::<Daemon>()) {
+                report_start_error(&handle, &e);
+            }
 
             // 给 daemon 一点启动时间再开窗，避免白屏
             std::thread::sleep(std::time::Duration::from_millis(1200));
@@ -123,7 +140,9 @@ fn main() {
                         let d = app.state::<Daemon>();
                         stop_daemon(&d);
                         std::thread::sleep(std::time::Duration::from_millis(400));
-                        let _ = start_daemon(app, &d);
+                        if let Err(e) = start_daemon(app, &d) {
+                            report_start_error(app, &e);
+                        }
                     }
                     "quit" => {
                         stop_daemon(&app.state::<Daemon>());

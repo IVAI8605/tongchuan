@@ -5,7 +5,7 @@
 
 ## 版本与协议
 
-- 版本号唯一来源：根 `Cargo.toml` 的 `workspace.package.version`（当前 `1.4.0`；本次只交付 CLI，Windows / Android / fpk 仍 1.3.1、未重编；协议仍 `0.20`）。
+- 版本号唯一来源：根 `Cargo.toml` 的 `workspace.package.version`（当前 `1.4.0`；三端同号发，本次代码只改 CLI，Windows / Android / fpk 都按这个唯一来源出 1.4.0 包；协议仍 `0.20`）。
 - 传输协议固定在 `crates/tc-core/src/session.rs` 的 `0.20`，与包版本解耦；门禁只比主次版本，`0.20.x` 各端互通。
 
 ## 目录
@@ -64,11 +64,8 @@ GRADLE_USER_HOME=$PWD/cache/gradle-home gradle --no-daemon :app:assembleRelease 
 在 Windows 构建机（需 Rust + Node + WebView2）：
 
 ```powershell
-# 先出 tc.exe 放进 windows-gui\src-tauri\bin\ ：
-cargo build --release -p tongchuan
-copy target\release\tc.exe windows-gui\src-tauri\bin\tc.exe
-# 再出 NSIS 安装包：
-cd windows-gui\src-tauri && npx @tauri-apps/cli@2 build
+# 一条命令：出 tc.exe -> 自动拷进 src-tauri\bin\ 并校验版本 -> 出 NSIS 安装包
+pwsh -NoProfile -File scripts\build-desktop.ps1
 ```
 
 ## NAS 飞牛 fpk

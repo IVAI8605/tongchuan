@@ -4,7 +4,7 @@
 
 ## 版本
 
-- fpk 版本取自根 `Cargo.toml` 的 `workspace.package.version`（与三端统一；当前 `1.3.x`），可用环境变量 `TC_FPK_VERSION` 覆盖。
+- fpk 版本取自根 `Cargo.toml` 的 `workspace.package.version`（与三端统一；当前 `1.4.0`），可用环境变量 `TC_FPK_VERSION` 覆盖。
 - 内含的 `tc` 二进制取自当前源码的 release 构建。
 
 ## 构建

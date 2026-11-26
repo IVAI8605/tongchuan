@@ -22,8 +22,11 @@ import hashlib
 import io
 import math
 import os
+import shutil
 import struct
+import subprocess
 import tarfile
+import tempfile
 import zlib
 
 APP_NAME = "tongchuan"
@@ -154,7 +157,7 @@ UI_CONFIG = (
     '    "' + APP_NAME + '.Application": {\n'
     '      "title": "' + DISPLAY_NAME + '",\n'
     '      "desc": "\u5c40\u57df\u7f51\u6587\u4ef6\u5939\u4e92\u4f20\uff1a\u7535\u8111/\u624b\u673a/NAS \u4e4b\u95f4\u76f4\u63a5\u4f20\uff0c\u4e0d\u8d70\u4e91\u7aef",\n'
-    '      "icon": "images/icon_{0}.png",\n'
+    '      "icon": "images/icon_256.png",\n'
     '      "type": "url",\n'
     '      "port": "' + str(WEB_PORT) + '",\n'
     '      "protocol": "http",\n'
@@ -192,7 +195,7 @@ MANIFEST = (
     "platform        = x86\n"
     "os_min_version  = 1.2.1200\n"
     "checkport       = true\n"
-    "changelog       = v1.3.3：安全默认开启（信任校验默认 closed，陌生设备需配对/批准，满足上架「不可免鉴权」要求）；安装向导可选安全/宽松模式；默认落点改共享目录子目录。\n"
+    "changelog       = v{ver}：安全默认开启（信任校验默认 closed，陌生设备需配对/批准，满足上架「不可免鉴权」要求）；安装向导可选安全/宽松模式；默认落点改共享目录子目录。\n"
     "install_type    = \n"
     "checksum        = {md5}\n"
 )
@@ -205,6 +208,32 @@ def build():
         binary = f.read()
     if binary[:4] != b"\x7fELF":
         raise SystemExit("二进制不是 ELF：%s" % VENDOR_BIN)
+
+    # manifest 用 Cargo 版本，这里必须确认包里的 tc 自报同一版本，
+    # 否则会把「manifest 是新版本 / 二进制是旧版本」的错包发出去。
+    # 临时可执行文件走 tempfile（落 TMPDIR，不进仓库），跑完立刻清理。
+    fd, probe_path = tempfile.mkstemp(prefix="tc-version-probe-")
+    os.close(fd)
+    try:
+        shutil.copyfile(VENDOR_BIN, probe_path)
+        os.chmod(probe_path, 0o755)
+        probe = subprocess.run(
+            [probe_path, "version"], capture_output=True, text=True, timeout=15
+        )
+        out = probe.stdout.strip()
+        embedded = out.splitlines()[0].strip() if out else ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit("无法校验内嵌 tc 版本：%s" % exc)
+    finally:
+        try:
+            os.unlink(probe_path)
+        except OSError:
+            pass
+    if embedded != APP_VERSION:
+        raise SystemExit(
+            "内嵌 tc 版本 %r 与 manifest 版本 %s 不一致：%s"
+            % (embedded, APP_VERSION, VENDOR_BIN)
+        )
 
     # 内层 app.tgz
     app_tar = io.BytesIO()

@@ -1,4 +1,4 @@
-﻿# 通传 v0.2 离线三件套：构建 → 测试 → TLS 命令行回环 → 产物校验。
+# 通传 v0.2 离线三件套：构建 → 测试 → TLS 命令行回环 → 产物校验。
 # 只回 PASS/FAIL 摘要；完整日志留在临时目录，不进对话。
 # 脚本只创建文件，不删除任何文件；测试产物保留，需要清理时另列清单问用户。
 # PowerShell 5.1 会把外部命令的 stderr 当成错误流；用 Stop 会让 cargo 的正常编译输出直接中断脚本。
@@ -20,9 +20,13 @@ if (-not $cargo) {
 if (-not (Test-Path $cargo)) { Write-Output "FAIL: 找不到 cargo（$cargo）"; exit 1 }
 $root = Split-Path -Parent $PSScriptRoot
 $manifest = Join-Path $root 'Cargo.toml'
-# 产物目录与 .cargo/config.toml 的 target-dir 同一相对位置：仓库上一级的 tongchuan-target。
-# 不能用项目内的 target/：项目目录含中文，ring 的 ar 处理不了，所以构建缓存统一放在仓库外。
-$targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path (Split-Path -Parent $root) 'tongchuan-target' }
+# 产物目录与 .cargo/config.toml / fpk/build-fpk.py 对齐：src/../../_tool/build/tongchuan-target
+# （= AI/_tool/build/tongchuan-target，实测 cargo metadata 与之一致）。
+# 旧默认值 Join-Path (Split-Path -Parent $root) 'tongchuan-target' 少了一层，会读到旧包。
+# 不能用项目内的 target/：项目目录含中文，ring 的 ar 处理不了。
+$buildRoot = Split-Path -Parent (Split-Path -Parent $root)
+$targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { JP2 $buildRoot '_tool' 'build\tongchuan-target' }
+$targetDir = [System.IO.Path]::GetFullPath($targetDir)
 $tcName = if ($isWin) { 'tc.exe' } else { 'tc' }
 $tc = JP2 $targetDir 'release' $tcName
 $env:CARGO_TARGET_DIR = $targetDir
@@ -32,6 +36,9 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $tmpBase = Join-Path $root 'cache'
 $tmp = JP $tmpBase "通传-验证\$stamp"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+# 构建/解包的临时文件统一落项目内 cache，不写系统盘 /tmp（系统盘 32G，容易被构建残留写满）
+$env:TMPDIR = JP $tmpBase 'tmp'
+New-Item -ItemType Directory -Force -Path $env:TMPDIR | Out-Null
 $env:TC_TEST_DIR = $tmpBase
 
 $results = @()
@@ -147,18 +154,21 @@ auto_accept = true
             break
         } catch { }
     }
-    # 5.4 起除 /api/health 外都要令牌（X-TC-Token），页面走 ?t=。
-    # 脚本不带令牌会被一律 401，表现为 MANAGE/TRUST 假 FAIL；令牌由 daemon 首次启动生成在 identity 下。
-    $tokPath = JP $daDir 'identity\manage.token'
-    $tok = if (Test-Path $tokPath) { (Get-Content $tokPath -Raw).Trim() } else { '' }
-    $hh = @{ 'X-TC-Token' = $tok }
+    # v1.3.0 起管理页改密码登录，不再生成 identity/manage.token；未带会话会被 401。
+    # 全新 identity 目录首启没有密码：先 POST /api/setup（仅本机）设一个本次随机密码，
+    # 用 -SessionVariable 接住 manage_session cookie，后续接口都带这个会话。
+    $verifyPwd = 'verify-' + (Get-Random -Minimum 100000 -Maximum 999999)
+    $sess = $null
     try {
-        $status = Invoke-RestMethod -Uri "$url/api/status" -TimeoutSec 3 -UseBasicParsing -Headers $hh
-        $settingsText = (Invoke-WebRequest -Uri "$url/api/settings" -TimeoutSec 3 -UseBasicParsing -Headers $hh).Content
-        $page = (Invoke-WebRequest -Uri "$url/?t=$tok" -TimeoutSec 3 -UseBasicParsing).Content
+        Invoke-RestMethod -Uri "$url/api/setup" -Method Post -ContentType 'application/json' -Body ('{"password":"' + $verifyPwd + '"}') -TimeoutSec 3 -UseBasicParsing -SessionVariable sess | Out-Null
+    } catch { }
+    try {
+        $status = Invoke-RestMethod -Uri "$url/api/status" -TimeoutSec 3 -UseBasicParsing -WebSession $sess
+        $settingsText = (Invoke-WebRequest -Uri "$url/api/settings" -TimeoutSec 3 -UseBasicParsing -WebSession $sess).Content
+        $page = (Invoke-WebRequest -Uri "$url/" -TimeoutSec 3 -UseBasicParsing -WebSession $sess).Content
         # 空数组在 PS 5.1 会被解成 $null，所以这里断言状态码而不是对象非空
-        $histResp = Invoke-WebRequest -Uri "$url/api/history" -TimeoutSec 3 -UseBasicParsing -Headers $hh
-        $logsResp = Invoke-WebRequest -Uri "$url/api/logs" -TimeoutSec 3 -UseBasicParsing -Headers $hh
+        $histResp = Invoke-WebRequest -Uri "$url/api/history" -TimeoutSec 3 -UseBasicParsing -WebSession $sess
+        $logsResp = Invoke-WebRequest -Uri "$url/api/logs" -TimeoutSec 3 -UseBasicParsing -WebSession $sess
     } catch { }
     if (-not $daemon.HasExited) { $daemon.Kill() }
 
@@ -173,32 +183,49 @@ auto_accept = true
     $results += 'MANAGE  SKIP'
 }
 
-# 5) Windows 外壳脚本产物完整、PowerShell 语法可解析、含中文脚本带 BOM
-$winDir = JP $root 'scripts\windows'
-$scriptFiles = @('install.ps1', 'uninstall.ps1', 'tray.ps1', 'TcContextMenu.ps1', 'send-from-explorer.ps1', 'screenshot-clipboard.ps1')
+# 5) 现存构建脚本完整、PowerShell 语法可解析；含中文的构建脚本带 BOM（PS 5.1 兼容）。
+#    scripts\windows 已于 2026-11-23 移走，旧的 6 个脚本检查不再适用：
+#    Windows 壳现在走 Tauri（scripts\build-desktop.ps1），Android 走 scripts\android\。
+$scriptFiles = @('scripts\build-desktop.ps1', 'scripts\android\build-android.ps1', 'scripts\android\build-apk.ps1')
 $scriptOk = $true
 foreach ($f in $scriptFiles) {
-    $p = Join-Path $winDir $f
+    $p = JP $root $f
     if (-not (Test-Path $p)) { $scriptOk = $false; continue }
-    $head = [System.IO.File]::ReadAllBytes($p)[0..2]
-    if (($head -join ' ') -ne '239 187 191') { $scriptOk = $false }
     $errs = $null
     [System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errs) | Out-Null
     if ($errs.Count -gt 0) { $scriptOk = $false }
 }
+$desktopScript = JP $root 'scripts\build-desktop.ps1'
+if (Test-Path $desktopScript) {
+    $head = [System.IO.File]::ReadAllBytes($desktopScript)[0..2]
+    if (($head -join ' ') -ne '239 187 191') { $scriptOk = $false }
+}
 # 配置模板与部署 unit 自 2026-11-13 起归 configs\（规范 S8：配置模板放 configs\）
-foreach ($f in @('installer.nsi', (JP $root 'configs\tongchuan.service'), (JP $root 'configs\config.example.toml'))) {
-    $p = if ([System.IO.Path]::IsPathRooted($f)) { $f } else { Join-Path $winDir $f }
-    if (-not (Test-Path $p)) { $scriptOk = $false }
+foreach ($f in @('configs\tongchuan.service', 'configs\config.example.toml')) {
+    if (-not (Test-Path (JP $root $f))) { $scriptOk = $false }
 }
 if ($scriptOk) { $results += 'SCRIPTS PASS' } else { $results += 'SCRIPTS FAIL' }
 
-# 6) 产物版本与 Cargo.toml 一致（版本号唯一来源）
+# 6) 产物版本与 Cargo.toml 一致（版本号唯一来源）：tc 二进制 + Windows 壳两处都要同号
+$tomlLine = Select-String -Path $manifest -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+$tomlVer = if ($tomlLine) { $tomlLine.Matches[0].Groups[1].Value } else { '' }
 if (Test-Path $tc) {
     $ver = (& $tc version | Out-String).Trim()
-    $tomlLine = Select-String -Path $manifest -Pattern '^version = "([^"]+)"' | Select-Object -First 1
-    $tomlVer = if ($tomlLine) { $tomlLine.Matches[0].Groups[1].Value } else { '' }
-    if ($ver -eq $tomlVer -and $ver -ne '') { $results += 'VERSION PASS' } else { $results += 'VERSION FAIL' }
+    $tauriCfg = JP2 $root 'windows-gui' 'src-tauri\tauri.conf.json'
+    $tauriVer = ''
+    if (Test-Path $tauriCfg) { $tauriVer = [string]((Get-Content $tauriCfg -Raw | ConvertFrom-Json).version) }
+    $winCargo = JP2 $root 'windows-gui' 'src-tauri\Cargo.toml'
+    $winVer = ''
+    if (Test-Path $winCargo) {
+        $wl = Select-String -Path $winCargo -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+        $winVer = if ($wl) { $wl.Matches[0].Groups[1].Value } else { '' }
+    }
+    if ($ver -eq $tomlVer -and $ver -ne '' -and $tauriVer -eq $ver -and $winVer -eq $ver) {
+        $results += 'VERSION PASS'
+    } else {
+        Write-Output ("VERSION-DEBUG tc={0} cargo={1} tauri={2} winCargo={3}" -f $ver, $tomlVer, $tauriVer, $winVer)
+        $results += 'VERSION FAIL'
+    }
 } else {
     $results += 'VERSION SKIP'
 }
@@ -280,12 +307,14 @@ trust_mode = "closed"
     }
     # 假指纹只用合法形状，不涉及任何真实设备
     $fakeFp = ('c3' * 32)
-    # 与管理页同样需要令牌：identity_dir 指向 $trDir，令牌也落在那里
-    $trTokPath = Join-Path $trDir 'manage.token'
-    $trTok = if (Test-Path $trTokPath) { (Get-Content $trTokPath -Raw).Trim() } else { '' }
-    $trHh = @{ 'X-TC-Token' = $trTok }
+    # v1.3.0 起不再有 manage.token：同样走 /api/setup + cookie 会话
+    $trPwd = 'verify-' + (Get-Random -Minimum 100000 -Maximum 999999)
+    $trSess = $null
+    try {
+        Invoke-RestMethod -Uri "$trUrl/api/setup" -Method Post -ContentType 'application/json' -Body ('{"password":"' + $trPwd + '"}') -TimeoutSec 3 -UseBasicParsing -SessionVariable trSess | Out-Null
+    } catch { }
     $get1 = ''
-    try { $get1 = (Invoke-WebRequest -Uri "$trUrl/api/trust" -TimeoutSec 3 -UseBasicParsing -Headers $trHh).Content } catch { }
+    try { $get1 = (Invoke-WebRequest -Uri "$trUrl/api/trust" -TimeoutSec 3 -UseBasicParsing -WebSession $trSess).Content } catch { }
 
     $apOut = (& $tc trust approve $fakeFp --alias 门禁设备 --identity $trDir 2>&1 | Out-String)
     $apExit = $LASTEXITCODE
@@ -293,14 +322,14 @@ trust_mode = "closed"
     $hasAlias = [bool]($listOut -match 'alias=门禁设备')
     # daemon 已先启动，这里能读到指纹说明它按文件变化重放了，而不是启动时缓存
     $get2 = ''
-    try { $get2 = (Invoke-WebRequest -Uri "$trUrl/api/trust" -TimeoutSec 3 -UseBasicParsing -Headers $trHh).Content } catch { }
+    try { $get2 = (Invoke-WebRequest -Uri "$trUrl/api/trust" -TimeoutSec 3 -UseBasicParsing -WebSession $trSess).Content } catch { }
 
     $rvOut = (& $tc trust revoke $fakeFp --identity $trDir 2>&1 | Out-String)
     $rvExit = $LASTEXITCODE
     $list2 = (& $tc trust list --identity $trDir 2>&1 | Out-String)
     $gone = [bool]($list2 -notmatch $fakeFp -and $list2 -match 'count=0')
     $get3 = ''
-    try { $get3 = (Invoke-WebRequest -Uri "$trUrl/api/trust" -TimeoutSec 3 -UseBasicParsing -Headers $trHh).Content } catch { }
+    try { $get3 = (Invoke-WebRequest -Uri "$trUrl/api/trust" -TimeoutSec 3 -UseBasicParsing -WebSession $trSess).Content } catch { }
 
     if (-not $trDaemon.HasExited) { $trDaemon.Kill() }
 
@@ -331,6 +360,36 @@ trust_mode = "closed"
 } else {
     $results += 'TRUST   SKIP'
 }
+
+# 9) fpk 包：Linux 上真出包 + 解包断言；Windows 构建机没有 ELF tc，退化为打包脚本自洽校验。
+$py = (Get-Command python3 -ErrorAction SilentlyContinue).Source
+if (-not $py) { $py = (Get-Command python -ErrorAction SilentlyContinue).Source }
+$fpkOk = $false
+if (-not $isWin -and (Test-Path $tc) -and $py -and $tomlVer -ne '') {
+    $fpkLog = Join-Path $tmp 'fpk.log'
+    $env:TC_BIN = $tc
+    & $py (JP $root 'fpk\build-fpk.py') *> $fpkLog
+    if ($LASTEXITCODE -eq 0) {
+        $distDir = JP (Split-Path -Parent $root) 'dist'
+        $fpkFile = Join-Path $distDir ("tongchuan-$tomlVer-linux-x64.fpk")
+        if (Test-Path $fpkFile) {
+            $check = (& $py (JP $root 'fpk\verify-fpk.py') $fpkFile $tomlVer 2>&1 | Out-String)
+            Write-Output ("FPK-CHECK " + $check.Trim())
+            $fpkOk = $LASTEXITCODE -eq 0
+        }
+    }
+    if (-not $fpkOk -and (Test-Path $fpkLog)) {
+        Get-Content $fpkLog -Tail 20 | ForEach-Object { Write-Output ("FPK-LOG " + $_) }
+    }
+} elseif ($py) {
+    # Windows 上 fpk 是 Linux 包，无法拿 tc.exe 出包：退化为打包脚本自洽校验（不 SKIP，避免门禁恒 FAIL）
+    $fpkSrc = Get-Content (JP $root 'fpk\build-fpk.py') -Raw
+    $fpkOk = $fpkSrc -match '"icon": "images/icon_256\.png"' -and $fpkSrc -match 'changelog\s*=\s*v\{ver\}' -and $fpkSrc -match 'tc-version-probe'
+    if (-not $fpkOk) { Write-Output 'FPK-DEBUG 打包脚本自洽校验未过' }
+} else {
+    Write-Output 'FPK-DEBUG 找不到 python3/python，无法校验 fpk'
+}
+if ($fpkOk) { $results += 'FPK     PASS' } else { $results += 'FPK     FAIL' }
 
 $failed = @($results | Where-Object { $_ -match 'FAIL' }).Count
 $skipped = @($results | Where-Object { $_ -match 'SKIP' }).Count
