@@ -121,6 +121,8 @@ fn default_output_is_unchanged_text() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(!text.trim().starts_with('{'), "默认输出不应是 JSON");
     assert!(text.trim().chars().all(|c| c.is_ascii_digit() || c == '.'), "默认应为纯版本号");
+    // 硬编码证明升版生效：v1.4.0 是新 CLI 能力的交付版本
+    assert_eq!(text.trim(), "1.4.0", "版本应升到 1.4.0");
 }
 
 #[test]
