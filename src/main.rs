@@ -1,5 +1,6 @@
 mod cli;
 
+use cli::output::{Event, FieldValue};
 use std::collections::HashMap;
 use std::env;
 use std::io;
@@ -28,6 +29,19 @@ fn main() {
         eprintln!("ERROR: {}", e.message());
         std::process::exit(e.exit_code());
     }
+}
+
+fn json_mode(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--json")
+}
+
+fn emit(e: cli::output::Event, args: &[String]) {
+    println!("{}", e.render(json_mode(args)));
+}
+
+/// JSON 专用：一行一个 event；默认文本路径一行都不改，JSON 只在这里输出。
+fn emit_json(e: Event) {
+    println!("{}", e.to_json());
 }
 
 fn bad(msg: &str) -> io::Error {
@@ -85,6 +99,37 @@ fn parse_root_map(args: &[String]) -> HashMap<String, String> {
         .collect()
 }
 
+/// 剥离全局开关与命令名，定位 trust 的位置参数（action / 指纹）。
+/// 不能硬用 args[1]/args[2]：`--json trust list` 时 args[1] 是命令名，会误判成 unknown action。
+fn trust_positionals(args: &[String]) -> Vec<String> {
+    let globals: std::collections::HashSet<&str> =
+        cli::spec::GLOBAL_ARGS.iter().map(|a| a.name).collect();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if globals.contains(a) {
+            i += 1;
+            continue;
+        }
+        if out.is_empty() && a == "trust" {
+            i += 1;
+            continue;
+        }
+        if a.starts_with('-') {
+            // trust 的选项都取值；连值一起跳过，避免把 --identity 的目录误当指纹
+            i += 1;
+            if i < args.len() && !args[i].starts_with('-') {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(a.to_string());
+        i += 1;
+    }
+    out
+}
+
 /// 信任库子命令。输出统一以 `TRUST ` 开头，方便脚本解析；
 /// 只追加事件，不删行，撤销后列表里消失但文件里的 add/revoke 都还在。
 fn trust_cmd(args: &[String]) -> io::Result<()> {
@@ -94,73 +139,198 @@ fn trust_cmd(args: &[String]) -> io::Result<()> {
         opt(args, "--config").map(PathBuf::from).as_deref(),
     )?;
     let store = TrustStore::new(&dir);
-    let action = args.get(1).map(String::as_str).unwrap_or("list");
+    let pos = trust_positionals(args);
+    let action = pos.first().map(String::as_str).unwrap_or("list");
     // 指纹支持位置参数（tc trust approve FP）与 --fp 两种写法，脚本与手敲都顺手
-    let fp = args
-        .get(2)
-        .filter(|s| !s.starts_with("--"))
-        .cloned()
-        .or_else(|| opt(args, "--fp"))
-        .unwrap_or_default();
+    let fp = pos.get(1).cloned().or_else(|| opt(args, "--fp")).unwrap_or_default();
 
     match action {
         "list" => {
             let peers = store.list()?;
-            println!(
-                "TRUST count={} file={}",
-                peers.len(),
-                store.path().display()
-            );
+            if json_mode(args) {
+                emit_json(
+                    Event::new("TRUST")
+                        .field("count", FieldValue::Num(peers.len() as u64))
+                        .field("file", FieldValue::Text(store.path().display().to_string())),
+                );
+            } else {
+                println!(
+                    "TRUST count={} file={}",
+                    peers.len(),
+                    store.path().display()
+                );
+            }
             for p in peers {
                 let alias = if p.alias.is_empty() { "-" } else { p.alias.as_str() };
-                println!(
-                    "TRUST fp={} alias={} by={} first={} last_seen={} name={} platform={}",
-                    p.fp,
-                    alias,
-                    if p.added_by.is_empty() { "-" } else { p.added_by.as_str() },
-                    p.first_seen,
-                    p.last_ts,
-                    if p.name.is_empty() { "-" } else { p.name.as_str() },
-                    if p.platform.is_empty() { "-" } else { p.platform.as_str() }
-                );
+                if json_mode(args) {
+                    emit_json(
+                        Event::new("TRUST")
+                            .field("fp", FieldValue::Text(p.fp.clone()))
+                            .field("alias", FieldValue::Text(alias.to_string()))
+                            .field(
+                                "by",
+                                FieldValue::Text(if p.added_by.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    p.added_by.clone()
+                                }),
+                            )
+                            .field("first", FieldValue::Num(p.first_seen as u64))
+                            .field("last_seen", FieldValue::Num(p.last_ts as u64))
+                            .field(
+                                "name",
+                                FieldValue::Text(if p.name.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    p.name.clone()
+                                }),
+                            )
+                            .field(
+                                "platform",
+                                FieldValue::Text(if p.platform.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    p.platform.clone()
+                                }),
+                            ),
+                    );
+                } else {
+                    println!(
+                        "TRUST fp={} alias={} by={} first={} last_seen={} name={} platform={}",
+                        p.fp,
+                        alias,
+                        if p.added_by.is_empty() { "-" } else { p.added_by.as_str() },
+                        p.first_seen,
+                        p.last_ts,
+                        if p.name.is_empty() { "-" } else { p.name.as_str() },
+                        if p.platform.is_empty() { "-" } else { p.platform.as_str() }
+                    );
+                }
             }
         }
         "pending" => {
             let list = store.pending()?;
-            println!("TRUST pending={} dir={}", list.len(), dir.display());
-            for e in list {
-                println!(
-                    "PENDING fp={} name={} platform={} ts={} reason={}",
-                    e.fp,
-                    if e.name.is_empty() { "-" } else { e.name.as_str() },
-                    if e.platform.is_empty() { "-" } else { e.platform.as_str() },
-                    e.ts,
-                    if e.note.is_empty() { "-" } else { e.note.as_str() }
+            if json_mode(args) {
+                emit_json(
+                    Event::new("TRUST")
+                        .field("pending", FieldValue::Num(list.len() as u64))
+                        .field("dir", FieldValue::Text(dir.display().to_string())),
                 );
+            } else {
+                println!("TRUST pending={} dir={}", list.len(), dir.display());
+            }
+            for e in list {
+                if json_mode(args) {
+                    emit_json(
+                        Event::new("PENDING")
+                            .field("fp", FieldValue::Text(e.fp.clone()))
+                            .field(
+                                "name",
+                                FieldValue::Text(if e.name.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    e.name.clone()
+                                }),
+                            )
+                            .field(
+                                "platform",
+                                FieldValue::Text(if e.platform.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    e.platform.clone()
+                                }),
+                            )
+                            .field("ts", FieldValue::Num(e.ts as u64))
+                            .field(
+                                "reason",
+                                FieldValue::Text(if e.note.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    e.note.clone()
+                                }),
+                            ),
+                    );
+                } else {
+                    println!(
+                        "PENDING fp={} name={} platform={} ts={} reason={}",
+                        e.fp,
+                        if e.name.is_empty() { "-" } else { e.name.as_str() },
+                        if e.platform.is_empty() { "-" } else { e.platform.as_str() },
+                        e.ts,
+                        if e.note.is_empty() { "-" } else { e.note.as_str() }
+                    );
+                }
             }
         }
         "approve" => {
             let alias = opt(args, "--alias").unwrap_or_default();
             let p = store.approve(&fp, &alias, "", "", "manual")?;
-            println!(
-                "TRUST approve ok=true fp={} alias={} by={} dir={}",
-                p.fp,
-                if p.alias.is_empty() { "-" } else { p.alias.as_str() },
-                if p.added_by.is_empty() { "manual" } else { p.added_by.as_str() },
-                dir.display()
-            );
+            if json_mode(args) {
+                emit_json(
+                    Event::new("TRUST")
+                        .field("action", FieldValue::Text("approve".into()))
+                        .field("ok", FieldValue::Bool(true))
+                        .field("fp", FieldValue::Text(p.fp.clone()))
+                        .field(
+                            "alias",
+                            FieldValue::Text(if p.alias.is_empty() {
+                                "-".to_string()
+                            } else {
+                                p.alias.clone()
+                            }),
+                        )
+                        .field(
+                            "by",
+                            FieldValue::Text(if p.added_by.is_empty() {
+                                "manual".to_string()
+                            } else {
+                                p.added_by.clone()
+                            }),
+                        )
+                        .field("dir", FieldValue::Text(dir.display().to_string())),
+                );
+            } else {
+                println!(
+                    "TRUST approve ok=true fp={} alias={} by={} dir={}",
+                    p.fp,
+                    if p.alias.is_empty() { "-" } else { p.alias.as_str() },
+                    if p.added_by.is_empty() { "manual" } else { p.added_by.as_str() },
+                    dir.display()
+                );
+            }
         }
         "revoke" => {
             let ok = store.revoke(&fp, "manual", "CLI 撤销")?;
-            println!("TRUST revoke ok={ok} fp={fp} dir={}", dir.display());
+            if json_mode(args) {
+                emit_json(
+                    Event::new("TRUST")
+                        .field("action", FieldValue::Text("revoke".into()))
+                        .field("ok", FieldValue::Bool(ok))
+                        .field("fp", FieldValue::Text(fp.clone()))
+                        .field("dir", FieldValue::Text(dir.display().to_string())),
+                );
+            } else {
+                println!("TRUST revoke ok={ok} fp={fp} dir={}", dir.display());
+            }
         }
         "rename" => {
             let alias = value(args, "--alias")?;
             let ok = store.rename(&fp, &alias)?;
-            println!(
-                "TRUST rename ok={ok} fp={fp} alias={alias} dir={}",
-                dir.display()
-            );
+            if json_mode(args) {
+                emit_json(
+                    Event::new("TRUST")
+                        .field("action", FieldValue::Text("rename".into()))
+                        .field("ok", FieldValue::Bool(ok))
+                        .field("fp", FieldValue::Text(fp.clone()))
+                        .field("alias", FieldValue::Text(alias.clone()))
+                        .field("dir", FieldValue::Text(dir.display().to_string())),
+                );
+            } else {
+                println!(
+                    "TRUST rename ok={ok} fp={fp} alias={alias} dir={}",
+                    dir.display()
+                );
+            }
         }
         other => return Err(bad(&format!("unknown trust action {other}"))),
     }
@@ -248,7 +418,44 @@ fn seg_mib_s(bytes: u64, us: u64) -> String {
     }
 }
 
-fn print_send(r: &tc_core::SendReport) {
+fn print_send(r: &tc_core::SendReport, args: &[String]) {
+    if json_mode(args) {
+        emit_json(
+            Event::new("SEND")
+                .field("txn", FieldValue::Text(r.txn_id.clone()))
+                .field("files", FieldValue::Num(r.files))
+                .field("bytes", FieldValue::Num(r.bytes))
+                .field("blocks", FieldValue::Num(r.blocks_sent))
+                .field("packs", FieldValue::Num(r.packs))
+                .field("streams", FieldValue::Num(r.streams as u64))
+                .field("skipped", FieldValue::Num(r.files_skipped))
+                .field("墙钟", FieldValue::Num(r.wall_us / 1000))
+                .field("均速", FieldValue::Text(mib_s(r.avg_bps)))
+                .field("扫描", FieldValue::Num(r.scan_us / 1000))
+                .field("数据", FieldValue::Num(r.data_us / 1000))
+                .field("等裁决", FieldValue::Num(r.verify_us / 1000))
+                .field(
+                    "dest",
+                    FieldValue::Text(if r.dest_dirs.is_empty() {
+                        "-".to_string()
+                    } else {
+                        r.dest_dirs.join(",")
+                    }),
+                )
+                .field("verdict", FieldValue::Text(r.verdict.clone())),
+        );
+        for f in &r.failed {
+            emit_json(
+                Event::new("FAILED")
+                    .field(
+                        "path",
+                        FieldValue::Text(f.path.as_deref().unwrap_or(&f.rel_path).to_string()),
+                    )
+                    .field("reason", FieldValue::Text(f.reason.clone())),
+            );
+        }
+        return;
+    }
     // dest=：接收端回报的落点根目录名（v0.11），命令行也能看出「传到哪个文件夹」
     // packs=：v0.14 收到的批量请求数，0 表示走的是逐块兼容路径
     // streams=：v0.15 实际开了几条数据连接，1 表示单流
@@ -284,7 +491,24 @@ fn print_send(r: &tc_core::SendReport) {
     }
 }
 
-fn print_recv(r: &tc_core::ReceiverReport) {
+fn print_recv(r: &tc_core::ReceiverReport, args: &[String]) {
+    if json_mode(args) {
+        emit_json(
+            Event::new("RECV")
+                .field("txn", FieldValue::Text(r.txn_id.clone()))
+                .field("files", FieldValue::Num(r.files))
+                .field("bytes", FieldValue::Num(r.bytes))
+                .field("written", FieldValue::Num(r.blocks_written))
+                .field("resumed", FieldValue::Num(r.resumed_blocks))
+                .field("streams", FieldValue::Num(r.streams_used as u64))
+                .field("verified", FieldValue::Bool(r.verified))
+                .field("interrupted", FieldValue::Bool(r.interrupted))
+                .field("skipped", FieldValue::Num(r.skipped_files))
+                .field("墙钟", FieldValue::Num(r.wall_us / 1000))
+                .field("均速", FieldValue::Text(mib_s(r.avg_bps))),
+        );
+        return;
+    }
     // v1.1.0：补数据阶段墙钟与真实均速（墙钟口径），一次性 recv 与 daemon 两条接收路径口径一致
     println!(
         "RECV txn={} files={} bytes={} written={} resumed={} streams={} verified={} interrupted={} skipped={} 墙钟={}ms 均速={}",
@@ -440,6 +664,7 @@ fn send_with_retry(
     retry_of: Option<&str>,
     force: bool,
     dest_id: Option<&str>,
+    args: &[String],
 ) -> io::Result<tc_core::SendReport> {
     let delays = if retry { tc_core::retry::delays() } else { Vec::new() };
     let mut chain = retry_of.map(str::to_string);
@@ -462,23 +687,49 @@ fn send_with_retry(
                 // 不可重试的错误（配对码、未信任、版本）立刻返回；次数用完也返回，但要留一句结论
                 if attempt >= delays.len() || !tc_core::retry::is_retryable(&e) {
                     if retry && attempt > 0 {
-                        println!(
-                            "RETRY gave_up attempts={} class={} reason={}",
-                            attempt + 1,
-                            tc_core::retry::classify(&e).label_zh(),
-                            e
-                        );
+                        if json_mode(args) {
+                            emit_json(
+                                Event::new("RETRY")
+                                    .field("status", FieldValue::Text("gave_up".into()))
+                                    .field("attempts", FieldValue::Num((attempt + 1) as u64))
+                                    .field(
+                                        "class",
+                                        FieldValue::Text(
+                                            tc_core::retry::classify(&e).label_zh().to_string(),
+                                        ),
+                                    )
+                                    .field("reason", FieldValue::Text(e.to_string())),
+                            );
+                        } else {
+                            println!(
+                                "RETRY gave_up attempts={} class={} reason={}",
+                                attempt + 1,
+                                tc_core::retry::classify(&e).label_zh(),
+                                e
+                            );
+                        }
                     }
                     return Err(e);
                 }
                 let wait = delays[attempt];
-                println!(
-                    "RETRY attempt={}/{} wait={}s reason={}",
-                    attempt + 1,
-                    delays.len(),
-                    wait.as_secs(),
-                    e
-                );
+                if json_mode(args) {
+                    emit_json(
+                        Event::new("RETRY")
+                            .field("status", FieldValue::Text("attempt".into()))
+                            .field("attempt", FieldValue::Num((attempt + 1) as u64))
+                            .field("total", FieldValue::Num(delays.len() as u64))
+                            .field("wait", FieldValue::Num(wait.as_secs()))
+                            .field("reason", FieldValue::Text(e.to_string())),
+                    );
+                } else {
+                    println!(
+                        "RETRY attempt={}/{} wait={}s reason={}",
+                        attempt + 1,
+                        delays.len(),
+                        wait.as_secs(),
+                        e
+                    );
+                }
                 std::thread::sleep(wait);
                 chain = Some(rec_id);
                 attempt += 1;
@@ -508,12 +759,28 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
 
     match command.as_str() {
         "version" => {
-            println!("{}", env!("CARGO_PKG_VERSION"));
+            if json_mode(args) {
+                emit(
+                    cli::output::Event::new("VERSION")
+                        .field("version", cli::output::FieldValue::Text(env!("CARGO_PKG_VERSION").into())),
+                    args,
+                );
+            } else {
+                println!("{}", env!("CARGO_PKG_VERSION"));
+            }
             Ok(())
         }
         "identity" => {
             let dir = value(args, "--dir")?;
             let id = Identity::load_or_create(Path::new(&dir))?;
+            if json_mode(args) {
+                emit_json(
+                    Event::new("IDENTITY")
+                        .field("fingerprint", FieldValue::Text(id.fingerprint_hex()))
+                        .field("dir", FieldValue::Text(dir.clone())),
+                );
+                return Ok(());
+            }
             println!("IDENTITY fingerprint={} dir={}", id.fingerprint_hex(), dir);
             Ok(())
         }
@@ -558,8 +825,9 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                 None,
                 args.iter().any(|a| a == "--force"),
                 opt(args, "--dest-id").as_deref(),
+                args,
             ) {
-                Ok(r) => print_send(&r),
+                Ok(r) => print_send(&r, args),
                 Err(e) => {
                     // 对端只接受 TLS 时，明文连接会被掐断，这里只体现为 EOF；给一句能执行的话
                     if e.kind() == io::ErrorKind::UnexpectedEof && peer_fp.is_none() {
@@ -581,7 +849,16 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                             dest_id: opt(args, "--dest-id"),
                         };
                         let p = queue::save(Path::new(&q), &task)?;
-                        println!("SEND QUEUED path={} reason={}", p.display(), e);
+                        if json_mode(args) {
+                            emit_json(
+                                Event::new("SEND")
+                                    .field("status", FieldValue::Text("QUEUED".into()))
+                                    .field("path", FieldValue::Text(p.display().to_string()))
+                                    .field("reason", FieldValue::Text(e.to_string())),
+                            );
+                        } else {
+                            println!("SEND QUEUED path={} reason={}", p.display(), e);
+                        }
                     } else {
                         return Err(e.into());
                     }
@@ -608,6 +885,19 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                 ident.as_ref().map(|(_, id)| id),
             )?;
             let list = tc_core::list_destinations_for(opener.as_ref(), pair_code.as_deref())?;
+            if json_mode(args) {
+                emit_json(
+                    Event::new("DESTS").field("count", FieldValue::Num(list.len() as u64)),
+                );
+                for d in &list {
+                    emit_json(
+                        Event::new("DEST")
+                            .field("id", FieldValue::Text(d.id.clone()))
+                            .field("name", FieldValue::Text(d.name.clone())),
+                    );
+                }
+                return Ok(());
+            }
             println!("DESTS count={}", list.len());
             for d in list {
                 println!("DEST id={} name={}", d.id, d.name);
@@ -620,6 +910,45 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(history::DEFAULT_LIMIT);
             let list = history::list(&dir, limit)?;
+            if json_mode(args) {
+                emit_json(
+                    Event::new("HISTORY")
+                        .field("count", FieldValue::Num(list.len() as u64))
+                        .field("dir", FieldValue::Text(dir.display().to_string())),
+                );
+                for r in &list {
+                    let paths = r
+                        .paths
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(";");
+                    emit_json(
+                        Event::new("REC")
+                            .field("id", FieldValue::Text(r.id.clone()))
+                            .field("ts", FieldValue::Num(r.ts as u64))
+                            .field("ok", FieldValue::Bool(r.ok))
+                            .field("verdict", FieldValue::Text(r.verdict.clone()))
+                            .field("to", FieldValue::Text(r.to.clone()))
+                            .field(
+                                "peerFp",
+                                FieldValue::Text(r.peer_fp.as_deref().unwrap_or("-").to_string()),
+                            )
+                            .field("files", FieldValue::Num(r.files))
+                            .field("bytes", FieldValue::Num(r.bytes))
+                            .field(
+                                "retryOf",
+                                FieldValue::Text(r.retry_of.as_deref().unwrap_or("-").to_string()),
+                            )
+                            .field("paths", FieldValue::Text(paths))
+                            .field(
+                                "reason",
+                                FieldValue::Text(r.reason.as_deref().unwrap_or("-").to_string()),
+                            ),
+                    );
+                }
+                return Ok(());
+            }
             println!("HISTORY count={} dir={}", list.len(), dir.display());
             for r in list {
                 let paths = r
@@ -685,6 +1014,13 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                 identity_dir,
                 queue_dir,
             };
+            if json_mode(args) {
+                let out = tc_core::diag::run(&opts)?;
+                emit_json(
+                    Event::new("DIAG").field("dir", FieldValue::Text(out.display().to_string())),
+                );
+                return Ok(());
+            }
             // 只打印目录：内容里有路径与设备名，终端回显没有必要，用户直接把这个文件夹发出去
             println!("DIAG dir={}", tc_core::diag::run(&opts)?.display());
             Ok(())
@@ -735,8 +1071,9 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                 Some(&rec.id),
                 args.iter().any(|a| a == "--force"),
                 opt(args, "--dest-id").as_deref(),
+                args,
             )?;
-            print_send(&r);
+            print_send(&r, args);
             Ok(())
         }
         "recv" => {
@@ -821,7 +1158,7 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                     )?
                 }
             };
-            print_recv(&r);
+            print_recv(&r, args);
             Ok(())
         }
         "daemon" => {
@@ -984,6 +1321,21 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                 .with_pair_tokens(Arc::clone(&state.pair)),
             );
             let listener = TcpListener::bind(&cfg.listen)?;
+            // 只输出公开标识：不含管理口令、配对码、私钥
+            if json_mode(args) {
+                emit_json(
+                    Event::new("DAEMON")
+                        .field("status", FieldValue::Text("started".into()))
+                        .field("version", FieldValue::Text(env!("CARGO_PKG_VERSION").into()))
+                        .field("listen", FieldValue::Text(cfg.listen.clone()))
+                        .field("fingerprint", FieldValue::Text(fp.clone()))
+                        .field(
+                            "destination",
+                            FieldValue::Text(cfg.destination.display().to_string()),
+                        )
+                        .field("trust_mode", FieldValue::Text(trust_mode.as_str().to_string())),
+                );
+            }
             let acc = TlsAccepter {
                 listener,
                 config: server_config(&id)?,
@@ -1132,6 +1484,21 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                 None => String::new(),
             };
             let peers = discover::listen(Duration::from_secs(timeout), &self_fp)?;
+            if json_mode(args) {
+                emit_json(
+                    Event::new("DISCOVER").field("count", FieldValue::Num(peers.len() as u64)),
+                );
+                for p in &peers {
+                    emit_json(
+                        Event::new("PEER")
+                            .field("addr", FieldValue::Text(p.addr.clone()))
+                            .field("fp", FieldValue::Text(p.fingerprint.clone()))
+                            .field("name", FieldValue::Text(p.name.clone()))
+                            .field("platform", FieldValue::Text(p.platform.clone())),
+                    );
+                }
+                return Ok(());
+            }
             println!("DISCOVER count={}", peers.len());
             for p in peers {
                 println!(
@@ -1147,6 +1514,26 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(DEFAULT_WINDOW_MINUTES);
             let list = queue::pending(Path::new(&dir), window)?;
+            if json_mode(args) {
+                emit_json(
+                    Event::new("QUEUE")
+                        .field("count", FieldValue::Num(list.len() as u64))
+                        .field("window", FieldValue::Num(window as u64))
+                        .field("unit", FieldValue::Text("m".into())),
+                );
+                for (p, t) in &list {
+                    emit_json(
+                        Event::new("TASK")
+                            .field("file", FieldValue::Text(p.display().to_string()))
+                            .field("to", FieldValue::Text(t.to.clone()))
+                            .field(
+                                "age",
+                                FieldValue::Num((queue::now_secs() - t.created_at) as u64),
+                            ),
+                    );
+                }
+                return Ok(());
+            }
             println!("QUEUE count={} window={}m", list.len(), window);
             for (p, t) in list {
                 println!(
@@ -1190,15 +1577,40 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                     Ok(r) => {
                         queue::mark_done(&p)?;
                         done += 1;
-                        println!("FLUSH OK txn={} verdict={}", r.txn_id, r.verdict);
+                        if json_mode(args) {
+                            emit_json(
+                                Event::new("FLUSH")
+                                    .field("status", FieldValue::Text("OK".into()))
+                                    .field("txn", FieldValue::Text(r.txn_id.clone()))
+                                    .field("verdict", FieldValue::Text(r.verdict.clone())),
+                            );
+                        } else {
+                            println!("FLUSH OK txn={} verdict={}", r.txn_id, r.verdict);
+                        }
                     }
                     Err(e) => {
                         skipped += 1;
-                        println!("FLUSH SKIP reason={}", e);
+                        if json_mode(args) {
+                            emit_json(
+                                Event::new("FLUSH")
+                                    .field("status", FieldValue::Text("SKIP".into()))
+                                    .field("reason", FieldValue::Text(e.to_string())),
+                            );
+                        } else {
+                            println!("FLUSH SKIP reason={}", e);
+                        }
                     }
                 }
             }
-            println!("FLUSH done={} skipped={}", done, skipped);
+            if json_mode(args) {
+                emit_json(
+                    Event::new("FLUSH")
+                        .field("done", FieldValue::Num(done as u64))
+                        .field("skipped", FieldValue::Num(skipped as u64)),
+                );
+            } else {
+                println!("FLUSH done={} skipped={}", done, skipped);
+            }
             Ok(())
         }
         "trust" => {

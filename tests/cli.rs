@@ -89,6 +89,41 @@ fn valid_command_still_exits_zero() {
 }
 
 #[test]
+fn json_output_for_core_commands() {
+    // version
+    let out = bin().args(["--json", "version"]).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v["kind"], "VERSION");
+    assert!(v["version"].as_str().is_some());
+
+    // discover：短超时，输出 DISCOVER 事件
+    let out = bin().args(["--json", "discover", "--timeout", "1"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let line = String::from_utf8_lossy(&out.stdout).lines().next().unwrap().to_string();
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v["kind"], "DISCOVER");
+    assert!(v["count"].is_u64(), "count 应是数字");
+
+    // identity：临时目录
+    let dir = std::env::temp_dir().join(format!("tc-cli-identity-{}", std::process::id()));
+    let out = bin().args(["--json", "identity", "--dir", dir.to_str().unwrap()]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v["kind"], "IDENTITY");
+    assert!(v["fingerprint"].as_str().is_some());
+}
+
+#[test]
+fn default_output_is_unchanged_text() {
+    // 不加 --json 时 version 仍输出纯版本号（旧契约）
+    let out = bin().arg("version").output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.trim().starts_with('{'), "默认输出不应是 JSON");
+    assert!(text.trim().chars().all(|c| c.is_ascii_digit() || c == '.'), "默认应为纯版本号");
+}
+
+#[test]
 fn global_json_flag_is_accepted_before_command() {
     let out = bin().args(["--json", "version"]).output().unwrap();
     assert!(out.status.success(), "--json 放命令前应被接受: {}", String::from_utf8_lossy(&out.stderr));
