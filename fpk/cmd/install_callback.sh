@@ -4,6 +4,8 @@ set -u
 APP_DIR="${TRIM_APPDEST:-/var/apps/${TRIM_APPNAME:-tongchuan}}"
 DATA_DIR="${TRIM_PKGVAR:-/vol1/@appdata/${TRIM_APPNAME:-tongchuan}}"
 mkdir -p "${DATA_DIR}" || exit 1
+# 升级迁移：数据目录可能是旧版以 root 创建，交给专用包用户，避免新版本(package 运行)读不到
+chown -R "${TRIM_APPNAME:-tongchuan}" "${DATA_DIR}" 2>/dev/null || true
 
 # 只取一段安全的名字（去掉路径分隔符/..），留空则由 main.sh 用默认「通传接收」。
 SUB="${wizard_subdir:-}"

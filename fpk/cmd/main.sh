@@ -60,6 +60,15 @@ CFG
     chmod 600 "${CFG}"
 fi
 
+# 升级迁移：已有配置但旧落点不可写（如从 root 部署/私有卷迁来），自动改到共享目录，避免无法接收。
+if [ -f "${CFG}" ]; then
+    _cur="$(sed -n 's/^destination[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "${CFG}" 2>/dev/null | head -n1)"
+    if [ -n "${_cur}" ] && ! { mkdir -p "${_cur}" 2>/dev/null && [ -w "${_cur}" ]; }; then
+        sed -i "s#^destination[[:space:]]*=.*#destination = \"${DEST}\"#; s#^allow[[:space:]]*=.*#allow = [\"${DEST}\"]\]#" "${CFG}" 2>/dev/null \
+            && echo "旧落点不可写，已改到 ${DEST}"
+    fi
+fi
+
 running() { [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; }
 
 cur_dest() {
