@@ -10,7 +10,32 @@ const NAMES: &[&str] = &[
 ];
 
 #[test]
-#[ignore = "Task 3 实现结构化帮助后启用"]
+fn help_json_exposes_full_schema() {
+    let out = bin().arg("--help-json").output().unwrap();
+    assert!(out.status.success(), "--help-json 应成功");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(text.trim()).expect("输出必须是合法 JSON");
+    assert_eq!(v["kind"], "HELP_SCHEMA");
+    assert!(v["version"].as_str().is_some(), "必须带版本号");
+    let cmds = v["commands"].as_array().expect("commands 必须是数组");
+    assert_eq!(cmds.len(), 13, "schema 必须覆盖 13 个命令");
+    for c in cmds {
+        assert!(c["name"].as_str().is_some(), "命令必须有 name");
+        assert!(c["group"].as_str().is_some(), "命令必须有 group");
+        assert!(c["args"].as_array().is_some(), "命令必须有 args 数组");
+    }
+    assert!(v["global_args"].as_array().is_some(), "必须有 global_args");
+}
+
+#[test]
+fn bare_invocation_prints_help() {
+    let out = bin().output().unwrap();
+    assert!(out.status.success(), "裸调用打印帮助应是成功");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("【传输】"), "总帮助应有分组: {text}");
+}
+
+#[test]
 fn every_command_help_lists_its_name() {
     for name in NAMES {
         let out = bin().arg(name).arg("--help").output().unwrap();

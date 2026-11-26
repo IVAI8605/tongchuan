@@ -488,6 +488,21 @@ fn run(args: &[String]) -> io::Result<()> {
     // 参数校验在业务分发前：拒绝未知命令/选项与非法数值。
     // 校验失败的文案保持与旧版一致风格（ERROR: ...），由 main 统一打印。
     let command = cli::spec::validate(args).map_err(|e| bad(&e))?;
+
+    // 帮助在业务分发前处理：全局 --help/--help-json，或命令级 `<cmd> --help`。
+    if args.iter().any(|a| a == "--help-json") {
+        println!("{}", cli::help::render_json());
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--help") {
+        if command == "help" {
+            print!("{}", cli::help::render_text(None));
+        } else {
+            print!("{}", cli::help::render_text(Some(&command)));
+        }
+        return Ok(());
+    }
+
     match command.as_str() {
         "version" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
@@ -1189,20 +1204,8 @@ fn run(args: &[String]) -> io::Result<()> {
             Ok(())
         }
         _ => {
-            println!("usage:");
-            println!("  tc version");
-            println!("  tc identity --dir DIR");
-            println!("  tc send --to IP:PORT --dir PATH [--dir PATH...] [--peer-fp HEX] [--pair-code CODE] [--identity DIR] [--queue-dir DIR] [--history-dir DIR] [--retry] [--force] [--dest-id ID]");
-            println!("  tc dests --to IP:PORT [--peer-fp HEX] [--pair-code CODE] [--identity DIR]");
-            println!("  tc history [--dir DIR] [--limit N]");
-            println!("  tc resend [--id ID|last] [--failed] [--history-dir DIR] [--pair-code CODE] [--identity DIR] [--retry] [--force] [--dest-id ID]");
-            println!("  tc diag [--config FILE] [--identity DIR] [--out DIR] [--log FILE] [--history-dir DIR]");
-            println!("  tc recv --listen IP:PORT --dest PATH [--identity DIR] [--pair-code CODE] [--trust-mode closed|open] [--root-map r0=NAME] [--streams N] [--announce]");
-            println!("  tc daemon --config FILE [--verify]");
-            println!("  tc discover [--timeout SEC] [--identity DIR]");
-            println!("  tc queue --dir DIR [--window MIN]");
-            println!("  tc flush --dir DIR [--window MIN] [--history-dir DIR]");
-            println!("  tc trust list|pending|approve FP|revoke FP|rename FP --alias NAME [--identity DIR | --config FILE]");
+            // 只剩裸调用（validate 返回 "help"）；未知命令已在入口拒绝。
+            print!("{}", cli::help::render_text(None));
             Ok(())
         }
     }
