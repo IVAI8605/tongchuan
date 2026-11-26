@@ -67,6 +67,11 @@ public class TcController {
     private volatile boolean recvPending;
     /** v1.4.1：上一轮是否正在接收；用于在「接收结束」这一拍刷新「最近接收」列表 */
     private volatile boolean wasReceiving;
+    /**
+     * v1.4.1：上一轮看到的 last_recv 内容。小文件几秒钟就收完，1 秒轮询很可能一次都没看到
+     * active=true，只靠「在收 → 收完」的跳变会漏刷；这里直接比对接收记录，任何一次新接收都刷新。
+     */
+    private volatile String seenLastRecv;
     private volatile boolean sendPaused;
     /** 用户点了取消：当前会话会被中断，后面排队的其它目标也不再开始 */
     private volatile boolean sendAborted;
@@ -1644,6 +1649,17 @@ public class TcController {
      * 接收中显示「已收 / 总量 · 速度」，不接收时清空；解析失败不抛，保持界面稳定。
      */
     private void refreshRecvProgress() {
+        // v1.4.1：接收记录变了就刷新列表。比对 last_recv 比看 active 跳变可靠——
+        // 几百毫秒的小传输在 1 秒轮询里根本看不到「在收」，原来的做法会漏刷。
+        String lr = activity.getSharedPreferences(Dest.PREFS, Activity.MODE_PRIVATE)
+                .getString("last_recv", "");
+        if (lr != null && !lr.equals(seenLastRecv)) {
+            boolean first = seenLastRecv == null;
+            seenLastRecv = lr;
+            if (!first && !lr.isEmpty()) {
+                refreshRecent();
+            }
+        }
         if (!ReceiverService.isRunning()) {
             ui.setRecvReceiving(false);
             ui.setRecvProgress(0);

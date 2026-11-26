@@ -4,6 +4,8 @@ import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
+import android.database.MatrixCursor;
+import android.provider.OpenableColumns;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
 
@@ -83,10 +85,39 @@ public class FileServeProvider extends ContentProvider {
         return guess == null ? "*/*" : guess;
     }
 
+    /**
+     * v1.4.1：把真实文件名/大小告诉系统。
+     * 原来这里返回 null，接收方应用（如 vivo 文档阅读器）拿不到 DISPLAY_NAME，
+     * 界面只能显示一个「file」，还可能走「导入并存储」而不是直接预览。
+     */
     @Override
     public Cursor query(Uri uri, String[] projection, String selection,
                         String[] selectionArgs, String sortOrder) {
-        return null;
+        String path = pathOf(uri);
+        if (path.isEmpty()) {
+            return null;
+        }
+        File base = Dest.current(getContext()).getAbsoluteFile();
+        File f = new File(path).getAbsoluteFile();
+        if (!f.getPath().startsWith(base.getPath())) {
+            return null;
+        }
+        String[] cols = projection != null && projection.length > 0
+                ? projection
+                : new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE};
+        MatrixCursor c = new MatrixCursor(cols, 1);
+        Object[] row = new Object[cols.length];
+        for (int i = 0; i < cols.length; i++) {
+            if (OpenableColumns.DISPLAY_NAME.equals(cols[i])) {
+                row[i] = f.getName();
+            } else if (OpenableColumns.SIZE.equals(cols[i])) {
+                row[i] = f.length();
+            } else {
+                row[i] = null;
+            }
+        }
+        c.addRow(row);
+        return c;
     }
 
     @Override
