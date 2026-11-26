@@ -99,9 +99,9 @@ fn parse_root_map(args: &[String]) -> HashMap<String, String> {
         .collect()
 }
 
-/// 剥离全局开关与命令名，定位 trust 的位置参数（action / 指纹）。
+/// 剥离全局开关与取值选项，按出现顺序返回位置参数。
 /// 不能硬用 args[1]/args[2]：`--json trust list` 时 args[1] 是命令名，会误判成 unknown action。
-fn trust_positionals(args: &[String]) -> Vec<String> {
+fn positionals(args: &[String]) -> Vec<String> {
     let globals: std::collections::HashSet<&str> =
         cli::spec::GLOBAL_ARGS.iter().map(|a| a.name).collect();
     let mut out = Vec::new();
@@ -112,12 +112,8 @@ fn trust_positionals(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
-        if out.is_empty() && a == "trust" {
-            i += 1;
-            continue;
-        }
         if a.starts_with('-') {
-            // trust 的选项都取值；连值一起跳过，避免把 --identity 的目录误当指纹
+            // 选项都取值；连值一起跳过，避免把 --identity 的目录误当位置参数
             i += 1;
             if i < args.len() && !args[i].starts_with('-') {
                 i += 1;
@@ -126,6 +122,15 @@ fn trust_positionals(args: &[String]) -> Vec<String> {
         }
         out.push(a.to_string());
         i += 1;
+    }
+    out
+}
+
+/// 信任库的位置参数：第一个是命令名 trust，业务层只看它后面的 action / 指纹。
+fn trust_positionals(args: &[String]) -> Vec<String> {
+    let mut out = positionals(args);
+    if out.first().map(String::as_str) == Some("trust") {
+        out.remove(0);
     }
     out
 }
@@ -742,6 +747,12 @@ fn send_with_retry(
 fn run(args: &[String]) -> Result<(), cli::error::CliError> {
     // 参数校验在业务分发前：拒绝未知命令/选项与非法数值（exit 2）。
     let command = cli::spec::validate(args)?;
+
+    // --version 是全局习惯用法：只打版本号 exit 0，别掉进裸调用的"总帮助"分支。
+    if args.iter().any(|a| a == "--version") {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     // 帮助在业务分发前处理：全局 --help/--help-json，或命令级 `<cmd> --help`。
     if args.iter().any(|a| a == "--help-json") {
@@ -1617,8 +1628,17 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
             trust_cmd(args)?;
             Ok(())
         }
+        "help" => {
+            // `tc help <cmd>` 给单命令详情；裸 `tc` / `tc help` 才给总帮助。
+            let pos = positionals(args);
+            match pos.get(1) {
+                Some(target) => print!("{}", cli::help::render_text(Some(target))),
+                None => print!("{}", cli::help::render_text(None)),
+            }
+            Ok(())
+        }
         _ => {
-            // 只剩裸调用（validate 返回 "help"）；未知命令已在入口拒绝。
+            // 兜底：validate 只会返回 help 或已知命令，正常到不了这里。
             print!("{}", cli::help::render_text(None));
             Ok(())
         }

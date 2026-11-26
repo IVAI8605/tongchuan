@@ -61,11 +61,28 @@ fn unknown_option_is_rejected_with_nonzero_exit() {
 
 #[test]
 fn streams_range_is_validated() {
-    // 用 version 而不是 recv：校验发生在分发之前，且 version 不会起监听、测试不会挂。
-    let out = bin().args(["version", "--streams", "0"]).output().unwrap();
-    assert!(!out.status.success(), "--streams 0 应返回非 0");
+    // 旧用例用 `version --streams 0`，会被 unknown option 拦下，根本没测到范围校验（假阳性）。
+    // 改用 recv 并补齐必填参数，让校验走到数值范围；validate 在 bind 前就拒，不会挂起。
+    let dest = std::env::temp_dir().join("tc-cli-streams-range-check");
+    let out = bin()
+        .args(["recv", "--listen", "127.0.0.1:0", "--dest", dest.to_str().unwrap(), "--streams", "0"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "--streams 0 应 exit 2: {}", String::from_utf8_lossy(&out.stderr));
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("1-8") || err.contains("streams"), "应说明取值范围: {err}");
+    assert!(err.contains("1-8"), "应说明取值范围: {err}");
+}
+
+#[test]
+fn non_numeric_streams_is_rejected() {
+    // --streams abc 旧版被静默吞掉、按默认 4 流起监听；现在必须在 bind 前 exit 2。
+    let dest = std::env::temp_dir().join("tc-cli-streams-abc-check");
+    let out = bin()
+        .args(["recv", "--listen", "127.0.0.1:0", "--dest", dest.to_str().unwrap(), "--streams", "abc"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "--streams abc 应 exit 2: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("streams"));
 }
 
 #[test]
@@ -129,5 +146,53 @@ fn default_output_is_unchanged_text() {
 fn global_json_flag_is_accepted_before_command() {
     let out = bin().args(["--json", "version"]).output().unwrap();
     assert!(out.status.success(), "--json 放命令前应被接受: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn version_flag_prints_only_version_and_exits_zero() {
+    // 用户拍板：--version 是通用习惯，打版本号 exit 0，不能掉进"总帮助"分支。
+    let out = bin().arg("--version").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "--version 应 exit 0");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text.trim(), "1.4.0", "--version 只应打版本号: {text}");
+    assert!(!text.contains("【传输】"), "--version 不应打总帮助: {text}");
+}
+
+#[test]
+fn help_json_schema_has_version_and_no_unimplemented_switch() {
+    let out = bin().arg("--help-json").output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    let globals = v["global_args"].as_array().unwrap();
+    let names: Vec<&str> = globals.iter().filter_map(|a| a["name"].as_str()).collect();
+    assert!(names.contains(&"--version"), "schema 必须保留 --version: {names:?}");
+    assert!(!names.contains(&"--strict-exit"), "未实现的 --strict-exit 必须从 schema 删除: {names:?}");
+    assert!(!text.contains("strict-exit"), "schema 全文不应再有 strict-exit 痕迹");
+}
+
+#[test]
+fn strict_exit_switch_is_gone() {
+    let out = bin().args(["--strict-exit", "version"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "已删除的开关应作为未知选项被拒: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown option"));
+}
+
+#[test]
+fn help_command_targets_one_command() {
+    let out = bin().args(["help", "trust"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Usage: tc trust"), "help trust 应给单命令详情: {text}");
+    assert!(text.contains("--alias"), "详情应列出该命令的参数: {text}");
+    assert!(!text.contains("【传输】"), "不应回退到总帮助: {text}");
+
+    // 全局开关夹在前面也不能把目标命令定位错
+    let with_global = bin().args(["--json", "help", "trust"]).output().unwrap();
+    assert_eq!(with_global.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&with_global.stdout).contains("Usage: tc trust"));
+
+    // 没有目标才回落到总帮助
+    let bare = bin().arg("help").output().unwrap();
+    assert!(String::from_utf8_lossy(&bare.stdout).contains("【传输】"));
 }
 

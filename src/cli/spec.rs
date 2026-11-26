@@ -56,6 +56,7 @@ static IDENTITY_ARGS: &[ArgSpec] = &[val("--dir", true, "证书与信任表目�
 static SEND_ARGS: &[ArgSpec] = &[
     val("--to", true, "对端 IP:PORT"),
     many("--dir", true, "要发送的目录，可重复"),
+    val("--config", false, "配置文件路径（解析身份目录）"),
     val("--peer-fp", false, "对端证书指纹（不给则自动发现）"),
     val("--pair-code", false, "配对码"),
     val("--identity", false, "本机身份目录"),
@@ -67,6 +68,7 @@ static SEND_ARGS: &[ArgSpec] = &[
 ];
 static DESTS_ARGS: &[ArgSpec] = &[
     val("--to", true, "对端 IP:PORT"),
+    val("--config", false, "配置文件路径（解析身份目录）"),
     val("--peer-fp", false, "对端证书指纹"),
     val("--pair-code", false, "配对码"),
     val("--identity", false, "本机身份目录"),
@@ -84,6 +86,7 @@ static DIAG_ARGS: &[ArgSpec] = &[
 ];
 static RESEND_ARGS: &[ArgSpec] = &[
     val("--id", false, "历史记录 id，默认 last"),
+    val("--config", false, "配置文件路径（解析身份目录）"),
     flag("--failed", "只重发该记录里失败的文件"),
     val("--history-dir", false, "发送历史目录"),
     val("--pair-code", false, "配对码"),
@@ -98,7 +101,7 @@ static RECV_ARGS: &[ArgSpec] = &[
     val("--identity", false, "身份目录（给了才启用 TLS）"),
     val("--pair-code", false, "配对码"),
     val("--trust-mode", false, "closed | open"),
-    val("--root-map", false, "根映射 r0=名称，可重复"),
+    many("--root-map", false, "根映射 r0=名称，可重复"),
     val("--streams", false, "并行流数 1-8"),
     flag("--announce", "广播本机可接收"),
 ];
@@ -116,6 +119,7 @@ static QUEUE_ARGS: &[ArgSpec] = &[
 ];
 static FLUSH_ARGS: &[ArgSpec] = &[
     val("--dir", true, "队列目录"),
+    val("--config", false, "配置文件路径（解析身份目录）"),
     val("--window", false, "时间窗口分钟数"),
     val("--history-dir", false, "发送历史目录"),
 ];
@@ -131,7 +135,6 @@ pub static GLOBAL_ARGS: &[ArgSpec] = &[
     flag("--help", "打印帮助"),
     flag("--help-json", "以 JSON 输出命令 schema"),
     flag("--json", "以 JSON 输出事件（默认 key=value）"),
-    flag("--strict-exit", "启用分类退出码 2/3/4"),
     flag("--version", "打印版本号"),
 ];
 
@@ -229,7 +232,7 @@ pub fn validate(args: &[String]) -> Result<String, CliError> {
     while i < args.len() {
         let a = args[i].as_str();
         if globals.contains(a) {
-            // 全局开关不取值，直接跳过（--help/--json/--strict-exit 等）
+            // 全局开关不取值，直接跳过（--help/--help-json/--json/--version）
             i += 1;
             continue;
         }
@@ -262,7 +265,12 @@ pub fn validate(args: &[String]) -> Result<String, CliError> {
             .map(|arg| arg.takes_value)
             .unwrap_or(false);
         if takes_value {
-            i += 2;
+            // 值必须存在且不是另一个 --选项，否则报用法错，不能把选项当值吞掉。
+            // 单 '-' 开头（如负数 -1）仍算值，交给下面的数值校验判定。
+            match args.get(i + 1) {
+                Some(next) if !next.starts_with("--") => i += 2,
+                _ => return Err(CliError::Usage(format!("{a} needs a value"))),
+            }
         } else {
             i += 1;
         }
@@ -282,13 +290,22 @@ pub fn validate(args: &[String]) -> Result<String, CliError> {
             }
         }
     }
-    // 数值范围：--streams 1-8，--limit/--timeout 非负
-    for (key, min, max) in [("--streams", 1u64, 8u64), ("--limit", 1, usize::MAX as u64), ("--timeout", 1, u64::MAX)] {
-        if let Some(v) = args.iter().position(|a| a == key).and_then(|p| args.get(p + 1)) {
-            if let Ok(n) = v.parse::<u64>() {
-                if n < min || n > max {
-                    return Err(CliError::Usage(format!("{key} must be {min}-{max}, got {n}")));
-                }
+    // 数值范围：给了值就必须解析成功且在范围内；parse 失败不再静默按默认处理。
+    for (key, min, max) in [
+        ("--streams", 1u64, 8u64),
+        ("--limit", 0, usize::MAX as u64),
+        ("--timeout", 0, u64::MAX),
+        ("--window", 0, u64::MAX),
+    ] {
+        if let Some(p) = args.iter().position(|a| a == key) {
+            let v = args
+                .get(p + 1)
+                .ok_or_else(|| CliError::Usage(format!("{key} needs a value")))?;
+            let n = v.parse::<u64>().map_err(|_| {
+                CliError::Usage(format!("{key} must be an integer in {min}-{max}, got {v}"))
+            })?;
+            if n < min || n > max {
+                return Err(CliError::Usage(format!("{key} must be {min}-{max}, got {n}")));
             }
         }
     }
@@ -297,4 +314,93 @@ pub fn validate(args: &[String]) -> Result<String, CliError> {
 
 pub fn commands() -> &'static [CmdSpec] {
     COMMANDS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{commands, validate};
+    use crate::cli::error::CliError;
+
+    #[test]
+    fn config_is_accepted_where_main_reads_it() {
+        // 审查发现：这几条命令的代码都读 --config，spec 漏登记会把合法调用拒成 unknown option。
+        let cases: &[&[&str]] = &[
+            &["send", "--config", "X", "--to", "127.0.0.1:1", "--dir", "/tmp"],
+            &["dests", "--config", "X", "--to", "127.0.0.1:1"],
+            &["resend", "--config", "X"],
+            &["flush", "--config", "X", "--dir", "/tmp"],
+        ];
+        for c in cases {
+            let args: Vec<String> = c.iter().map(|s| s.to_string()).collect();
+            assert!(
+                validate(&args).is_ok(),
+                "{} 应合法: {:?}",
+                c.join(" "),
+                validate(&args)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_numeric_values_are_usage_errors() {
+        // 审查发现：给了值但 parse 失败时旧代码 `if let Ok(n)` 直接跳过，非法值被静默吞掉。
+        let cases: &[&[&str]] = &[
+            &["recv", "--listen", "127.0.0.1:1", "--dest", "/tmp", "--streams", "9"],
+            &["recv", "--listen", "127.0.0.1:1", "--dest", "/tmp", "--streams", "0"],
+            &["recv", "--listen", "127.0.0.1:1", "--dest", "/tmp", "--streams", "abc"],
+            &["history", "--limit", "abc"],
+            &["history", "--limit", "-1"],
+            &["discover", "--timeout", "abc"],
+            &["queue", "--dir", "/tmp", "--window", "abc"],
+            &["queue", "--dir", "/tmp", "--window", "-1"],
+        ];
+        for c in cases {
+            let args: Vec<String> = c.iter().map(|s| s.to_string()).collect();
+            match validate(&args) {
+                Err(CliError::Usage(_)) => {}
+                other => panic!("{} 应为 Usage 错误: {:?}", c.join(" "), other),
+            }
+        }
+    }
+
+    #[test]
+    fn valid_numeric_values_are_accepted() {
+        let cases: &[&[&str]] = &[
+            &["recv", "--listen", "127.0.0.1:1", "--dest", "/tmp", "--streams", "8"],
+            &["history", "--limit", "0"],
+            &["discover", "--timeout", "1"],
+            &["queue", "--dir", "/tmp", "--window", "0"],
+        ];
+        for c in cases {
+            let args: Vec<String> = c.iter().map(|s| s.to_string()).collect();
+            assert!(validate(&args).is_ok(), "{} 应合法: {:?}", c.join(" "), validate(&args));
+        }
+    }
+
+    #[test]
+    fn value_option_cannot_swallow_next_option() {
+        // 旧代码 i += 2 无条件跳下一项：`send --to --json --dir x` 把 --json 当 --to 的值吞了。
+        let cases: &[&[&str]] = &[
+            &["send", "--to", "--json", "--dir", "/tmp"],
+            &["history", "--limit", "--json"],
+            &["send", "--to"], // 选项在末尾，没有值
+        ];
+        for c in cases {
+            let args: Vec<String> = c.iter().map(|s| s.to_string()).collect();
+            match validate(&args) {
+                Err(CliError::Usage(_)) => {}
+                other => panic!("{} 应为 Usage 错误: {:?}", c.join(" "), other),
+            }
+        }
+    }
+
+    #[test]
+    fn root_map_is_marked_repeatable() {
+        // main.rs 的 parse_root_map 用 values() 收全部，帮助文本也写"可重复"，
+        // schema 里却用 val() 标成不可重复，AI 会少传根映射。
+        let recv = commands().iter().find(|c| c.name == "recv").unwrap();
+        let arg = recv.args.iter().find(|a| a.name == "--root-map").unwrap();
+        assert!(arg.takes_value, "--root-map 应取值");
+        assert!(arg.repeatable, "--root-map 应标为可重复");
+    }
 }
