@@ -17,6 +17,7 @@
 - **历史 / 重传 / 离线队列**：`tc history`、`tc resend`，对端离线先入队再 `tc flush`。
 - **内嵌管理页**：daemon 自带网页（概览、发送、记录、安全、设置），密码登录，`/api/health` 匿名。
 - **小文件提速（1.3.1）**：单块小文件懒创建落盘，手机往 NAS 传大量照片更快。
+- **桌面端顺手操作（1.4.1）**：收到文件右下角弹 10 秒提示、点开即落点目录；文件/文件夹拖进窗口直接发；只能开一个实例；托盘右键菜单正常。
 
 ## 支持的平台
 
@@ -57,16 +58,24 @@ cargo build --release -p tongchuan   # 产物：tc（Windows 为 tc.exe）
 
 **Android**：先在 Linux 交叉编译 `libtc_jni.so` 放入 `android/app/src/main/jniLibs/arm64-v8a/`，再用 Gradle 出包；正式签名通过环境变量 `TC_KEYSTORE_PROPS` 指向 `keystore.properties` 启用（未设置则退回 debug）。
 
-**Windows 桌面端**：在 Windows 构建机（需 Rust + Node + WebView2）执行 `cd windows-gui\src-tauri && npx @tauri-apps/cli@2 build`。
+**Windows 桌面端**：在 Windows 构建机上执行 `pwsh scripts\build-desktop.ps1`（会自动编译 `tc.exe`、校验版本、再出 NSIS 安装包）；只想手动出壳则 `cd windows-gui\src-tauri && npx @tauri-apps/cli@2 build`。
 
 **NAS 飞牛 fpk**：`python3 fpk/build-fpk.py`。各端完整命令见 [docs/README.md](./docs/README.md)。
 
 ## 安全模型
 
 - 自签证书 + 指纹固定，不校验证书链（局域网 IP 会变），首次连接需人工确认指纹。
-- 信任默认 `open`（安全功能默认关闭 = 同网段发现即可传）；开启「严格配对」才按信任表放行；`open` 只放行、不写信任表。
+- 信任默认 **`closed`**（1.3.3 起）：陌生设备首次发送要在管理页扫码配对或手动批准；需要「同网段免配对」时可在管理页或安装向导切到宽松模式 `open`（仅建议自用可信网络）。安卓侧载版为不打断日常使用仍默认 `open`，Windows 桌面端与 fpk 默认 `closed`。
 - 落点受 `allow` 白名单限制，路径逐段清洗，拒绝 `..` 与越界写入。
 - 管理页用密码登录，不区分用户；不要直接暴露到公网。
+
+## 常见问题
+
+- **管理页要密码，忘了怎么办**：删掉 `identity/manage.pwd` 再打开页面即可重设（Windows：`%APPDATA%\com.tongchuan.desktop\identity\manage.pwd`；飞牛：`/vol1/@appdata/tongchuan/identity/manage.pwd`）。1.3.x 及更早用「令牌链接」登录，升级到 1.4 后第一次会要求设密码，属正常。
+- **右下角提示看不到 / 位置奇怪**：1.4.1 起提示跟随鼠标所在的那块屏；装了串流、投屏类虚拟显示器（Windows 把它们设成「主屏」）时不会再弹到屏幕外。
+- **NAS 盘休眠，头一个文件卡很久**：1.4.1 起发送前会并行预热源盘，并对读块做退避重试，只是盘起转需要几秒，不会把整场发送打断。
+- **端口被占用 / 开了两个窗口**：1.4.1 起桌面端只允许一个实例；若接收起不来，先查 53318/53319 是否被别的东西占了。
+- **手机点「最近接收」没反应**：1.4.1 修了 URI 双重转义导致找不到文件的问题；仍打不开说明系统没有能打开该类型的应用。
 
 ## 版本与兼容
 

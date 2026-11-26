@@ -20,7 +20,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
+use tauri::{LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
 struct Daemon {
     child: Mutex<Option<Child>>,
@@ -180,20 +180,30 @@ fn human_bytes(n: u64) -> String {
 }
 
 /// 把提示窗口摆到当前显示器右下角，避开任务栏。
+/// 多屏环境（装了串流/投屏虚拟屏时，Windows 可能把虚拟屏设成「主屏」）按主屏算会弹到
+/// 用户看不见的地方，所以优先跟「管理页窗口所在的那块屏」，其次鼠标所在屏，最后才用主屏。
 fn place_toast(app: &tauri::AppHandle, w: &tauri::WebviewWindow) {
-    let (w_px, h_px) = (360u32, 104u32);
-    let monitor = w
-        .current_monitor()
+    let (w_log, h_log) = (360.0f64, 104.0f64);
+    let anchor = app
+        .cursor_position()
         .ok()
-        .flatten()
+        .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
+        .or_else(|| {
+            app.get_webview_window("main")
+                .and_then(|m| m.current_monitor().ok().flatten())
+        })
+        .or_else(|| w.current_monitor().ok().flatten())
         .or_else(|| app.primary_monitor().ok().flatten());
-    if let Some(m) = monitor {
+    if let Some(m) = anchor {
         let size = m.size();
         let pos = m.position();
-        let x = pos.x + size.width as i32 - w_px as i32 - 20;
+        let scale = m.scale_factor();
+        let w_px = (w_log * scale) as i32;
+        let h_px = (h_log * scale) as i32;
+        let x = pos.x + size.width as i32 - w_px - 20;
         // 任务栏一般 40~60px 高，留 72px 保证不压在上面
-        let y = pos.y + size.height as i32 - h_px as i32 - 72;
-        let _ = w.set_size(PhysicalSize::new(w_px, h_px));
+        let y = pos.y + size.height as i32 - h_px - 72;
+        let _ = w.set_size(LogicalSize::new(w_log, h_log));
         let _ = w.set_position(PhysicalPosition::new(x, y));
     }
 }
@@ -216,10 +226,10 @@ fn show_toast(app: &tauri::AppHandle, target: PathBuf, text: String) {
     // 不抢焦点：用户可能正在别的窗口里打字；提示只在用户主动点它时才有动作
     let _ = w.eval("window.tcToastUpdate&&window.tcToastUpdate()");
 
-    // 5 秒后自动收起；期间又来一个文件就把代号推进，旧计时器自动作废
+    // 10 秒后自动收起（5 秒用户来不及点）；期间又来一个文件就把代号推进，旧计时器自动作废
     let app2 = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(5));
+        std::thread::sleep(Duration::from_secs(10));
         let st = app2.state::<ToastState>();
         if st.generation.load(Ordering::SeqCst) == gen {
             if let Some(w) = app2.get_webview_window("toast") {
@@ -352,6 +362,10 @@ fn main() {
                 generation: AtomicU64::new(0),
                 dest: dest.clone(),
                 _lock: lock,
+            });
+            // 必须先注册再取：下面 start_daemon 以及托盘菜单都要 state::<Daemon>()
+            app.manage(Daemon {
+                child: Mutex::new(None),
             });
 
             if let Err(e) = start_daemon(&handle, &app.state::<Daemon>()) {
