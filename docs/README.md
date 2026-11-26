@@ -8,8 +8,8 @@
 局域网文件夹互传工具：电脑、手机、NAS 之间走文件通道传目录，不走云端。
 源码在本仓库根目录，Linux 运行二进制在项目上一级（NAS 部署位）。
 
-当前版本：`1.3.0`（**三端统一**，唯一来源 `Cargo.toml` 的 `workspace.package.version`）。
-协议：`0.20`，已与包版本解耦（`tc-core` 里固定为 `0.20`）；三端 1.3.0（安卓 / Windows / 飞牛 fpk）与 0.20.x 各端互通。
+当前版本：`1.3.1`（**三端统一**，唯一来源 `Cargo.toml` 的 `workspace.package.version`）。
+协议：`0.20`，已与包版本解耦（`tc-core` 里固定为 `0.20`）；三端 1.3.1（安卓 / Windows / 飞牛 fpk）与 0.20.x 各端互通。
 
 ## 目录
 
@@ -21,7 +21,7 @@
 | `src/windows-gui/` | Windows 桌面端（Tauri 2：原生托盘 + 管理页窗口 + NSIS 安装包） |
 | `configs/` | 配置模板；本机 `config.toml` 不入库 |
 | `tests/windows/` | Windows 回归测试（旧 PowerShell 版，已随旧版搁置） |
-| `../dist/通传-1.3.0.apk` | 最近的 Android 交付包（本地产物，不提交） |
+| `../dist/通传-1.3.1.apk` | 最近的 Android 交付包（本地产物，不提交） |
 
 运行数据在项目根的 `identity/`、`logs/`、`queue/`、`received/`，含设备私钥，不入库、不重构。
 
