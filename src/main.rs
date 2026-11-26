@@ -1,3 +1,5 @@
+mod cli;
+
 use std::collections::HashMap;
 use std::env;
 use std::io;

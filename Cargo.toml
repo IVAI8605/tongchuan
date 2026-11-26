@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 tc-core = { path = "crates/tc-core" }
+serde_json = "1"
 
 # 公开发布的二进制不留符号与调试信息；构建路径的去标识化在 .cargo/config.toml 的 rustflags 里。
 [profile.release]
