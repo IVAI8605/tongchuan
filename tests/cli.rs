@@ -69,6 +69,26 @@ fn streams_range_is_validated() {
 }
 
 #[test]
+fn usage_errors_always_exit_two() {
+    // AI 靠退出码区分「命令写错了」(2) 和「传输失败」(1)。
+    // 这是缺陷修复：旧版未知命令静默 exit 0，AI 无法判断失败。
+    let unknown = bin().args(["version", "--bogus"]).output().unwrap();
+    assert_eq!(unknown.status.code(), Some(2), "未知选项应 exit 2");
+
+    let missing = bin().args(["send"]).output().unwrap();
+    assert_eq!(missing.status.code(), Some(2), "缺必填参数应 exit 2");
+
+    let bad_cmd = bin().arg("nope").output().unwrap();
+    assert_eq!(bad_cmd.status.code(), Some(2), "未知命令应 exit 2");
+}
+
+#[test]
+fn valid_command_still_exits_zero() {
+    let out = bin().arg("version").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
 fn global_json_flag_is_accepted_before_command() {
     let out = bin().args(["--json", "version"]).output().unwrap();
     assert!(out.status.success(), "--json 放命令前应被接受: {}", String::from_utf8_lossy(&out.stderr));

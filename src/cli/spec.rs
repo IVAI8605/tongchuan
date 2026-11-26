@@ -217,11 +217,12 @@ pub static COMMANDS: &[CmdSpec] = &[
     ];
 
 use std::collections::HashSet;
+use crate::cli::error::CliError;
 
 /// 在业务分发前校验参数：识别全局选项、命令名、未知选项、数值范围。
 /// 返回命令名（剥离全局选项后）；裸调用返回 "help"。
 /// 校验只拒绝非法输入，不改写任何参数——现有 value()/opt()/values() 的读取行为保持原样。
-pub fn validate(args: &[String]) -> Result<String, String> {
+pub fn validate(args: &[String]) -> Result<String, CliError> {
     let globals: HashSet<&str> = GLOBAL_ARGS.iter().map(|a| a.name).collect();
     let mut command: Option<String> = None;
     let mut i = 0usize;
@@ -251,7 +252,7 @@ pub fn validate(args: &[String]) -> Result<String, String> {
             .iter()
             .any(|spec| spec.name == a);
         if !known {
-            return Err(format!("unknown option {a}"));
+            return Err(CliError::Usage(format!("unknown option {a}")));
         }
         // 取值型选项：跳过紧跟的值
         let takes_value = command
@@ -268,14 +269,25 @@ pub fn validate(args: &[String]) -> Result<String, String> {
     }
     let cmd = command.unwrap_or_else(|| "help".to_string());
     if cmd != "help" && !commands().iter().any(|s| s.name == cmd) {
-        return Err(format!("unknown command {cmd}"));
+        return Err(CliError::Usage(format!("unknown command {cmd}")));
+    }
+    // 帮助请求不检查必填参数：tc <cmd> --help 应总能打印帮助。
+    let asking_help = args.iter().any(|a| a == "--help" || a == "--help-json");
+    if !asking_help {
+        if let Some(spec) = commands().iter().find(|s| s.name == cmd) {
+            for arg in spec.args.iter().filter(|a| a.required) {
+                if !args.iter().any(|a| a == arg.name) {
+                    return Err(CliError::Usage(format!("missing {}", arg.name)));
+                }
+            }
+        }
     }
     // 数值范围：--streams 1-8，--limit/--timeout 非负
     for (key, min, max) in [("--streams", 1u64, 8u64), ("--limit", 1, usize::MAX as u64), ("--timeout", 1, u64::MAX)] {
         if let Some(v) = args.iter().position(|a| a == key).and_then(|p| args.get(p + 1)) {
             if let Ok(n) = v.parse::<u64>() {
                 if n < min || n > max {
-                    return Err(format!("{key} must be {min}-{max}, got {n}"));
+                    return Err(CliError::Usage(format!("{key} must be {min}-{max}, got {n}")));
                 }
             }
         }

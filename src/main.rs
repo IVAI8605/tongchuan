@@ -25,13 +25,17 @@ use tc_core::{
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if let Err(e) = run(&args) {
-        eprintln!("ERROR: {e}");
-        std::process::exit(1);
+        eprintln!("ERROR: {}", e.message());
+        std::process::exit(e.exit_code());
     }
 }
 
 fn bad(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg)
+}
+
+fn usage_err(msg: &str) -> cli::error::CliError {
+    cli::error::CliError::Usage(msg.to_string())
 }
 
 fn value(args: &[String], key: &str) -> io::Result<String> {
@@ -484,10 +488,9 @@ fn send_with_retry(
 }
 
 
-fn run(args: &[String]) -> io::Result<()> {
-    // 参数校验在业务分发前：拒绝未知命令/选项与非法数值。
-    // 校验失败的文案保持与旧版一致风格（ERROR: ...），由 main 统一打印。
-    let command = cli::spec::validate(args).map_err(|e| bad(&e))?;
+fn run(args: &[String]) -> Result<(), cli::error::CliError> {
+    // 参数校验在业务分发前：拒绝未知命令/选项与非法数值（exit 2）。
+    let command = cli::spec::validate(args)?;
 
     // 帮助在业务分发前处理：全局 --help/--help-json，或命令级 `<cmd> --help`。
     if args.iter().any(|a| a == "--help-json") {
@@ -518,7 +521,7 @@ fn run(args: &[String]) -> io::Result<()> {
             let to = value(args, "--to")?;
             let dirs = values(args, "--dir");
             if dirs.is_empty() {
-                return Err(bad("send needs at least one --dir"));
+                return Err(usage_err("send needs at least one --dir"));
             }
             let paths: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
             // 没给指纹先听一轮公告：接收端强制 TLS 时，明文连接只会得到一句 EOF 报错
@@ -580,7 +583,7 @@ fn run(args: &[String]) -> io::Result<()> {
                         let p = queue::save(Path::new(&q), &task)?;
                         println!("SEND QUEUED path={} reason={}", p.display(), e);
                     } else {
-                        return Err(e);
+                        return Err(e.into());
                     }
                 }
             }
@@ -699,8 +702,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     .filter_map(|f| f.path.as_ref().map(PathBuf::from))
                     .collect();
                 if paths.is_empty() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
+                    return Err(usage_err(
                         "这条历史没有可重发的失败文件（旧接收端可能未返回清单）",
                     ));
                 }
