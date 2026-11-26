@@ -97,8 +97,9 @@ impl Default for Config {
             allow: vec![base.join("received")],
             pair_code: None,
             auto_accept: true,
-            // v0.21.0：安全功能默认关闭 = 发现即可传（trust_mode=open）；要严格指纹配对在管理页开启或改 closed
-            trust_mode: "open".into(),
+            // 安全默认：closed = 只放行信任表内的设备，陌生发送方需配对/批准后才可写入。
+            // 免配对的 open 只作显式选择（自用侧载端或排障），不再作缺省值——缺省免鉴权等于让同网段任何人可写盘。
+            trust_mode: "closed".into(),
             // 家用局域网同时投递的通常是两三台设备，4 足够；再多也只是多几个线程
             max_sessions: 4,
             log_dir: base.join("logs"),
@@ -817,9 +818,10 @@ mod tests {
         assert_eq!(hist[1].roots, vec!["照片".to_string()]);
     }
 
-    /// 无 trust_mode 的配置（旧配置/新装）：按 v0.21.0 默认 open（安全功能默认关，发现即可传），不解析失败也不空串。
+    /// 无 trust_mode 的配置（旧配置/新装）：安全默认为 closed（需配对/批准），不解析失败也不空串。
+    /// 缺省给 open 等于让同网段任何人免鉴权写盘，上架审核明确不接受。
     #[test]
-    fn legacy_config_without_trust_mode_defaults_to_open() {
+    fn legacy_config_without_trust_mode_defaults_to_closed() {
         let dir = std::env::temp_dir().join(format!("tc-trustcfg-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let p = dir.join("config.toml");
@@ -829,6 +831,6 @@ mod tests {
         )
         .unwrap();
         let c = Config::load_or_create(&p).unwrap();
-        assert_eq!(c.trust_mode, "open");
+        assert_eq!(c.trust_mode, "closed");
     }
 }

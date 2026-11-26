@@ -14,5 +14,25 @@
         "rules": [{ "required": false, "message": "填子目录名（不要带斜杠）或留空" }]
       }
     ]
+  },
+  {
+    "stepTitle": "安全模式",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "决定其他设备往这台 NAS 传文件时的校验方式。<b>安全（推荐）</b>：陌生设备首次发送需在管理页生成二维码配对或手动批准，他人无法随意写你的盘；<b>宽松</b>：同网段任何设备发现即可直接传，无任何校验，仅适合完全可信的自用环境。"
+      },
+      {
+        "type": "radio",
+        "field": "wizard_trust_mode",
+        "label": "信任校验",
+        "initValue": "closed",
+        "options": [
+          { "label": "安全（需配对/批准，推荐）", "value": "closed" },
+          { "label": "宽松（同网段免配对，仅自用）", "value": "open" }
+        ],
+        "rules": [{ "required": true, "message": "请选择一种模式" }]
+      }
+    ]
   }
 ]

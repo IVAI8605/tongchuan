@@ -15,6 +15,12 @@ case "$SUB" in
     *) printf '%s\n' "$SUB" > "${DATA_DIR}/.install-subdir"; echo "tongchuan: 接收子目录设为 $SUB" ;;
 esac
 
+# 记录安装向导选的信任模式（缺省 closed）
+TM="${wizard_trust_mode:-closed}"
+[ "$TM" = "open" ] || TM="closed"
+printf '%s\n' "$TM" > "${DATA_DIR}/.install-trust"
+echo "tongchuan: 信任模式 = $TM"
+
 chmod 755 "${APP_DIR}/bin/tc" 2>/dev/null
 echo "tongchuan installed: ${APP_DIR} ; data: ${DATA_DIR}"
 exit 0

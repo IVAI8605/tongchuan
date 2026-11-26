@@ -179,7 +179,7 @@ MANIFEST = (
     "appname         = " + APP_NAME + "\n"
     "version         = {ver}\n"
     "display_name    = " + DISPLAY_NAME + "\n"
-    "desc            = <p><b>通传</b>（局域网互传）：电脑、手机与 NAS 之间直接传文件夹，不走云端。</p><p>接收文件默认落在应用共享文件夹「tongchuan」下的子目录（首次安装可命名，管理页可改）；安全功能默认关闭（同网段发现即可传），要严格指纹配对把 trust_mode 改成 closed。</p>\n"
+    "desc            = <p><b>通传</b>（局域网互传）：电脑、手机与 NAS 之间直接传文件夹，不走云端。</p><p>接收文件默认落在应用共享文件夹「tongchuan」下的子目录（首次安装可命名，管理页可改）；安全默认开启（陌生设备需在管理页扫码配对或批准，不可免鉴权写入），如需同网段免配对可在管理页切到宽松模式。</p>\n"
     "source          = thirdparty\n"
     "desktop_uidir   = ui\n"
     "desktop_applaunchname = " + APP_NAME + ".Application\n"
@@ -192,7 +192,7 @@ MANIFEST = (
     "platform        = x86\n"
     "os_min_version  = 1.2.1200\n"
     "checkport       = true\n"
-    "changelog       = 首次安装可选接收子目录（落在应用共享文件夹）；按飞牛应用规范整改（包用户运行、图标/平台等）；管理页改密码登录。\n"
+    "changelog       = v1.3.3：安全默认开启（信任校验默认 closed，陌生设备需配对/批准，满足上架「不可免鉴权」要求）；安装向导可选安全/宽松模式；默认落点改共享目录子目录。\n"
     "install_type    = \n"
     "checksum        = {md5}\n"
 )

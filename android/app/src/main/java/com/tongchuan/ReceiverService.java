@@ -209,6 +209,9 @@ public class ReceiverService extends Service {
             o.put("queue_dir", new File(getFilesDir(), "queue").getAbsolutePath());
             o.put("log_days", 2);
             o.put("auto_accept", true);
+            // 侧载自用端：显式保持免配对（同网段发现即可传）。核心默认已改为 closed（安全默认，
+            // 供上架端使用），这里显式声明，避免手机端跟着核心默认变成必须配对、影响现有体验。
+            o.put("trust_mode", "open");
             JSONArray allow = new JSONArray();
             allow.put(dest.getAbsolutePath());
             o.put("allow", allow);

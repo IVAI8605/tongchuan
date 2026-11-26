@@ -1555,7 +1555,7 @@ mod tests {
         let (code, _, body) = call(&st, "GET", "/api/trust", b"", "fp", &lim);
         assert_eq!(code, 200);
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["mode"], "open");
+        assert_eq!(v["mode"], "closed");
         assert_eq!(v["peers"].as_array().unwrap().len(), 0);
 
         // 接口批准后下一次 GET 就要看到；撤销后同理，不依赖重启

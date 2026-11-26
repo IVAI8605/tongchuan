@@ -29,7 +29,8 @@ fi
 
 # 首次运行落一份可编辑配置：接收落点、端口都在这里，改完 restart 生效。
 # 落点：用 data-share 共享目录（系统创建并对应用用户 ACL 授权，用户在文件管理器可见），可在其下加一个子目录名。
-SHARE_DIR="${TRIM_DATA_SHARE_PATHS%%:*}"
+SHARE_DIR="${TRIM_DATA_SHARE_PATHS:-}"
+SHARE_DIR="${SHARE_DIR%%:*}"
 [ -n "${SHARE_DIR}" ] || SHARE_DIR="${DATA_DIR}"
 SUB="通传接收"
 if [ -s "${DATA_DIR}/.install-subdir" ]; then
@@ -38,6 +39,13 @@ if [ -s "${DATA_DIR}/.install-subdir" ]; then
 fi
 DEST="${SHARE_DIR}/${SUB}"
 [ -d "${DEST}" ] || mkdir -p "${DEST}" 2>/dev/null
+
+# 信任模式：安装向导可选，缺省 closed（安全默认）
+TRUST_MODE="closed"
+if [ -s "${DATA_DIR}/.install-trust" ]; then
+    _t="$(head -n1 "${DATA_DIR}/.install-trust" 2>/dev/null | tr -d '\r' | sed 's/[[:space:]]*$//')"
+    [ "${_t}" = "open" ] && TRUST_MODE="open"
+fi
 if [ ! -f "${CFG}" ]; then
     cat > "${CFG}" <<CFG
 # 通传守护进程配置（应用中心生成，可直接编辑，改完 ./cmd/main restart 生效）
@@ -52,8 +60,10 @@ log_dir = "${DATA_DIR}/logs"
 queue_dir = "${DATA_DIR}/queue"
 log_days = 2
 log_level = "info"
-# 安全功能默认关闭 = 信任校验关闭：同网段发现即可传（自动信任）。要严格指纹配对，改成 "closed"。
-trust_mode = "open"
+# 信任策略（上架要求：不可免鉴权访问）：
+#   closed = 只放行已配对的设备（安全默认，陌生发送方需在管理页生成二维码配对或批准）
+#   open   = 同网段发现即可传（免鉴权，仅自用/排障，公开分发不要用）
+trust_mode = "${TRUST_MODE}"
 streams = 4
 hash_cache = true
 CFG
@@ -67,6 +77,18 @@ if [ -f "${CFG}" ]; then
         sed -i "s#^destination[[:space:]]*=.*#destination = \"${DEST}\"#; s#^allow[[:space:]]*=.*#allow = [\"${DEST}\"]\]#" "${CFG}" 2>/dev/null \
             && echo "旧落点不可写，已改到 ${DEST}"
     fi
+fi
+
+# 升级迁移：把安装向导选的信任模式一次性写进已有配置（之后用户在管理页改的不再覆盖）。
+if [ -s "${DATA_DIR}/.install-trust" ] && [ -f "${CFG}" ]; then
+    _tm="$(head -n1 "${DATA_DIR}/.install-trust" 2>/dev/null | tr -d '\r' | sed 's/[[:space:]]*$//')"
+    case "${_tm}" in
+        open|closed)
+            sed -i "s#^trust_mode[[:space:]]*=.*#trust_mode = \"${_tm}\"#" "${CFG}" 2>/dev/null \
+                && echo "已应用安装向导的信任模式: ${_tm}"
+            mv -f "${DATA_DIR}/.install-trust" "${DATA_DIR}/.install-trust.done" 2>/dev/null || true
+            ;;
+    esac
 fi
 
 running() { [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; }
