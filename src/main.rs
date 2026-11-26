@@ -485,7 +485,10 @@ fn send_with_retry(
 
 
 fn run(args: &[String]) -> io::Result<()> {
-    match args.first().map(String::as_str).unwrap_or("help") {
+    // 参数校验在业务分发前：拒绝未知命令/选项与非法数值。
+    // 校验失败的文案保持与旧版一致风格（ERROR: ...），由 main 统一打印。
+    let command = cli::spec::validate(args).map_err(|e| bad(&e))?;
+    match command.as_str() {
         "version" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             Ok(())

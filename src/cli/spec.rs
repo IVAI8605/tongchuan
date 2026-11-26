@@ -216,6 +216,73 @@ pub static COMMANDS: &[CmdSpec] = &[
         },
     ];
 
+use std::collections::HashSet;
+
+/// 在业务分发前校验参数：识别全局选项、命令名、未知选项、数值范围。
+/// 返回命令名（剥离全局选项后）；裸调用返回 "help"。
+/// 校验只拒绝非法输入，不改写任何参数——现有 value()/opt()/values() 的读取行为保持原样。
+pub fn validate(args: &[String]) -> Result<String, String> {
+    let globals: HashSet<&str> = GLOBAL_ARGS.iter().map(|a| a.name).collect();
+    let mut command: Option<String> = None;
+    let mut i = 0usize;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if globals.contains(a) {
+            // 全局开关不取值，直接跳过（--help/--json/--strict-exit 等）
+            i += 1;
+            continue;
+        }
+        if command.is_none() && !a.starts_with('-') {
+            command = Some(a.to_string());
+            i += 1;
+            continue;
+        }
+        if !a.starts_with('-') {
+            // 位置参数（trust 的 FP、命令的 PATH 等）交给业务层解释
+            i += 1;
+            continue;
+        }
+        // 选项：查当前命令的 spec（含全局），未登记即拒绝
+        let known = command
+            .as_deref()
+            .and_then(|c| commands().iter().find(|s| s.name == c))
+            .map(|s| s.args)
+            .unwrap_or(&[])
+            .iter()
+            .any(|spec| spec.name == a);
+        if !known {
+            return Err(format!("unknown option {a}"));
+        }
+        // 取值型选项：跳过紧跟的值
+        let takes_value = command
+            .as_deref()
+            .and_then(|c| commands().iter().find(|s| s.name == c))
+            .and_then(|s| s.args.iter().find(|arg| arg.name == a))
+            .map(|arg| arg.takes_value)
+            .unwrap_or(false);
+        if takes_value {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    let cmd = command.unwrap_or_else(|| "help".to_string());
+    if cmd != "help" && !commands().iter().any(|s| s.name == cmd) {
+        return Err(format!("unknown command {cmd}"));
+    }
+    // 数值范围：--streams 1-8，--limit/--timeout 非负
+    for (key, min, max) in [("--streams", 1u64, 8u64), ("--limit", 1, usize::MAX as u64), ("--timeout", 1, u64::MAX)] {
+        if let Some(v) = args.iter().position(|a| a == key).and_then(|p| args.get(p + 1)) {
+            if let Ok(n) = v.parse::<u64>() {
+                if n < min || n > max {
+                    return Err(format!("{key} must be {min}-{max}, got {n}"));
+                }
+            }
+        }
+    }
+    Ok(cmd)
+}
+
 pub fn commands() -> &'static [CmdSpec] {
     COMMANDS
 }
