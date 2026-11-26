@@ -26,7 +26,8 @@ python3 fpk/build-fpk.py
 ## 默认行为
 
 - 首次 `start` 在应用数据目录生成可编辑的 `config.toml`（端口、接收落点都在里面）。
-- **接收落点**：**首次安装时会有「接收目录」向导**，可当场选一个目录（绝对路径）；留空则默认 `应用数据目录/received/`（保证可写、不指向特定机器的私有卷）。之后也能改 `config.toml` 的 `destination` 并同步 `allow`，再 `cmd/main restart`。
+- **接收落点**：落在应用的**共享文件夹「tongchuan」**下（系统创建、文件管理器可见、并 ACL 授权给应用用户）。**首次安装可命名子目录**（默认「通传接收」）。之后也能改 `config.toml` 的 `destination` 并同步 `allow`，再 `cmd/main restart`。
+- **运行身份**：以专用包用户运行（`run-as: package`），不申请 root。
 - **管理页**：`http://<NAS>:53319/`，**首次打开设置管理密码，之后密码登录**（`/api/health` 匿名）。
 - **信任默认开放**（安全功能默认关闭 = 同网段发现即可传）；要严格指纹配对，把 `trust_mode` 改成 `closed` 并批准对方。
 - **卸载不删数据**：`uninstall_callback` 只提示数据位置，身份 / 信任 / 已收文件都保留，重装可继续用。

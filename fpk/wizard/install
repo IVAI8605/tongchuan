@@ -4,14 +4,14 @@
     "items": [
       {
         "type": "tips",
-        "helpText": "选择手机、电脑传入的文件保存到 NAS 的哪个目录。填一个绝对路径（例如 /vol1/1000/通传接收），应用会在此目录下保存收到的文件。<br>留空则默认保存到应用数据目录的 received/，之后也可在管理页里修改。"
+        "helpText": "收到的文件会保存到应用在文件管理器里的共享文件夹「tongchuan」下的一个子目录里。可自定义子目录名；留空默认为「通传接收」。之后也能在管理页修改。"
       },
       {
         "type": "text",
-        "field": "wizard_destination",
-        "label": "接收目录（绝对路径，可留空用默认）",
+        "field": "wizard_subdir",
+        "label": "接收子目录名（可留空，默认「通传接收」）",
         "initValue": "",
-        "rules": [{ "required": false, "message": "请填绝对路径或留空" }]
+        "rules": [{ "required": false, "message": "填子目录名（不要带斜杠）或留空" }]
       }
     ]
   }

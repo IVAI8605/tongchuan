@@ -22,19 +22,21 @@ if [ -d "${IMPORT_DIR}" ] && [ -f "${IMPORT_DIR}/identity.cer" ]; then
     cp -f "${IMPORT_DIR}/identity.cer" "${DATA_DIR}/identity/identity.cer" 2>/dev/null
     cp -f "${IMPORT_DIR}/identity.key" "${DATA_DIR}/identity/identity.key" 2>/dev/null
     [ -f "${IMPORT_DIR}/trust.jsonl" ] && cp -f "${IMPORT_DIR}/trust.jsonl" "${DATA_DIR}/identity/trust.jsonl" 2>/dev/null
-    chown -R root:root "${DATA_DIR}/identity" 2>/dev/null
     chmod 600 "${DATA_DIR}/identity"/* 2>/dev/null
     mv "${IMPORT_DIR}" "${IMPORT_DIR}.done.$(date +%s)" 2>/dev/null || true
     echo "imported identity from ${IMPORT_DIR}"
 fi
 
 # 首次运行落一份可编辑配置：接收落点、端口都在这里，改完 restart 生效。
-# 落点：安装向导里用户选的目录优先（install_callback 写在 .install-destination），否则默认应用数据目录 received/
-DEST="${RECV_DEFAULT}"
-if [ -s "${DATA_DIR}/.install-destination" ]; then
-    _d="$(head -n1 "${DATA_DIR}/.install-destination" 2>/dev/null | sed 's/[[:space:]]*$//')"
-    [ -n "${_d}" ] && DEST="${_d}"
+# 落点：用 data-share 共享目录（系统创建并对应用用户 ACL 授权，用户在文件管理器可见），可在其下加一个子目录名。
+SHARE_DIR="${TRIM_DATA_SHARE_PATHS%%:*}"
+[ -n "${SHARE_DIR}" ] || SHARE_DIR="${DATA_DIR}"
+SUB="通传接收"
+if [ -s "${DATA_DIR}/.install-subdir" ]; then
+    _s="$(head -n1 "${DATA_DIR}/.install-subdir" 2>/dev/null | tr -d '\r' | sed 's#[/\\].*##; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "${_s}" ] && [ "${_s}" != "." ] && [ "${_s}" != ".." ] && SUB="${_s}"
 fi
+DEST="${SHARE_DIR}/${SUB}"
 [ -d "${DEST}" ] || mkdir -p "${DEST}" 2>/dev/null
 if [ ! -f "${CFG}" ]; then
     cat > "${CFG}" <<CFG
@@ -42,7 +44,7 @@ if [ ! -f "${CFG}" ]; then
 alias = "通传NAS"
 listen = "0.0.0.0:53318"
 manage = "0.0.0.0:53319"
-# 接收落点：首次安装时选定的目录（未选则为应用数据目录的 received/）。要改就改这里并让 allow 同步。
+# 接收落点：数据共享目录下的子目录（首次安装可命名）。要改就改这里并让 allow 同步。
 destination = "${DEST}"
 allow = ["${DEST}"]
 identity_dir = "${DATA_DIR}/identity"
@@ -110,7 +112,7 @@ stop() {
     echo "stopped"
 }
 
-status() { if running; then echo "running (pid $(cat "${PID_FILE}"))"; return 0; else echo "stopped"; return 1; fi; }
+status() { if running; then echo "running (pid $(cat "${PID_FILE}"))"; return 0; else echo "stopped"; return 3; fi; }
 
 case "${1:-start}" in
     start) start ;;

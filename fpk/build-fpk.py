@@ -164,15 +164,12 @@ UI_CONFIG = (
     '  }\n'
     '}\n'
 )
-PRIVILEGE = '{\n  "defaults": {\n    "run-as": "root"\n  }\n}\n'
+PRIVILEGE = '{\n  "defaults": {\n    "run-as": "package"\n  }\n}\n'
 RESOURCE = (
     '{\n'
     '  "data-share": {\n'
     '    "shares": [\n'
-    '      {\n'
-    '        "name": "' + APP_NAME + '",\n'
-    '        "permission": { "rw": ["' + APP_NAME + '"] }\n'
-    '      }\n'
+    '      { "name": "' + APP_NAME + '" }\n'
     '    ]\n'
     '  }\n'
     '}\n'
@@ -182,8 +179,7 @@ MANIFEST = (
     "appname         = " + APP_NAME + "\n"
     "version         = {ver}\n"
     "display_name    = " + DISPLAY_NAME + "\n"
-    "desc            = <p><b>通传</b>（局域网互传）：电脑、手机与 NAS 之间直接传文件夹，不走云端。</p><p>接收文件默认落在应用数据目录的 received/（可在管理页或 config.toml 改到共享目录）；安全功能默认关闭（同网段发现即可传），要严格指纹配对把 trust_mode 改成 closed。</p>\n"
-    "arch            = x86_64\n"
+    "desc            = <p><b>通传</b>（局域网互传）：电脑、手机与 NAS 之间直接传文件夹，不走云端。</p><p>接收文件默认落在应用共享文件夹「tongchuan」下的子目录（首次安装可命名，管理页可改）；安全功能默认关闭（同网段发现即可传），要严格指纹配对把 trust_mode 改成 closed。</p>\n"
     "source          = thirdparty\n"
     "desktop_uidir   = ui\n"
     "desktop_applaunchname = " + APP_NAME + ".Application\n"
@@ -193,11 +189,11 @@ MANIFEST = (
     "distributor_url = https://github.com/IVAI8605/tongchuan\n"
     "service_port    = " + str(WEB_PORT) + "\n"
     "ctl_stop        = true\n"
-    "platform        = \n"
+    "platform        = x86\n"
     "os_min_version  = 1.2.1200\n"
     "checkport       = true\n"
-    "changelog       = 首次安装可选接收目录；默认落点改为应用数据目录 received/，不再写死私有路径；管理页改密码登录。\n"
-    "install_type    = root\n"
+    "changelog       = 首次安装可选接收子目录（落在应用共享文件夹）；按飞牛应用规范整改（包用户运行、图标/平台等）；管理页改密码登录。\n"
+    "install_type    = \n"
     "checksum        = {md5}\n"
 )
 
@@ -243,14 +239,14 @@ def build():
         tar_add(tf, "config", isdir=True)
         tar_add(tf, "config/privilege", PRIVILEGE.encode("utf-8"))
         tar_add(tf, "config/resource", RESOURCE.encode("utf-8"))
-        tar_add(tf, "ICON.PNG", make_icon(128))
+        tar_add(tf, "ICON.PNG", make_icon(64))
         tar_add(tf, "ICON_256.PNG", make_icon(256))
         tar_add(tf, "manifest", MANIFEST.format(ver=APP_VERSION, md5=md5).encode("utf-8"))
         tar_add(tf, "ui", isdir=True)
         tar_add(tf, "ui/config", UI_CONFIG.encode("utf-8"))
         tar_add(tf, "ui/images", isdir=True)
-        tar_add(tf, "ui/images/64.png", make_icon(64))
-        tar_add(tf, "ui/images/256.png", make_icon(256))
+        tar_add(tf, "ui/images/icon_64.png", make_icon(64))
+        tar_add(tf, "ui/images/icon_256.png", make_icon(256))
         # 安装向导（首次安装让用户选接收目录）：有 wizard/install 就一起打包
         wiz = os.path.join(HERE, "wizard", "install")
         if os.path.exists(wiz):
