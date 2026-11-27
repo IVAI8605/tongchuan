@@ -11,7 +11,7 @@
 
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -64,14 +64,20 @@ fn reg(args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+fn menu_debug(msg: &str) {
+    let path = data_dir().join("menu.log");
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
 fn reg_add(key: &str, name: Option<&str>, value: &str) {
-    match name {
-        Some(n) => {
-            reg(&["add", key, "/v", n, "/d", value, "/f"]);
-        }
-        None => {
-            reg(&["add", key, "/ve", "/d", value, "/f"]);
-        }
+    let ok = match name {
+        Some(n) => reg(&["add", key, "/v", n, "/d", value, "/f"]),
+        None => reg(&["add", key, "/ve", "/d", value, "/f"]),
+    };
+    if !ok {
+        menu_debug(&format!("reg_add FAIL {key} {:?}", name));
     }
 }
 
@@ -101,7 +107,7 @@ fn own_fingerprint() -> Option<String> {
 
 fn discover_peers() -> Vec<Peer> {
     let out = match Command::new(companion_tc())
-        .args(["discover", "--timeout", "2"])
+        .args(["discover", "--timeout", "3"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
     {
@@ -160,6 +166,22 @@ fn discover_peers() -> Vec<Peer> {
     peers
 }
 
+/// 单次发现的窗口只有几秒，手机和 NAS 的公告周期不一样，一轮经常只逮到一个。
+/// 这里合并多轮结果：同一指纹只留一条，地址优先局域网 192.168.*。
+fn merge_peers(dst: &mut Vec<Peer>, src: Vec<Peer>) {
+    for p in src {
+        if let Some(same) = dst.iter_mut().find(|q| q.fp == p.fp) {
+            if !same.addr.starts_with("192.168.") && p.addr.starts_with("192.168.") {
+                same.addr = p.addr;
+            }
+            continue;
+        }
+        dst.push(p);
+    }
+    dst.sort_by_key(|p| if p.addr.starts_with("192.168.") { 0 } else { 1 });
+    dst.truncate(3);
+}
+
 /// 重写右键菜单：`*\shell`（文件）、`Directory\shell`（文件夹）、`Folder\shell`。
 /// 只认这三处的扁平项，不再用级联子菜单——级联要 SubCommands + 动态 shell 键，
 /// Explorer 缓存一乱就变成空白项（v1.4.1 之前那套就是这么坏的）。
@@ -196,7 +218,29 @@ fn install_shell_menu() {
         }
     }
 
-    let peers = discover_peers();
+    // 发现设备走 UDP 公告，偶发丢包很常见。空结果绝不清空已有菜单：
+    // 宁可用上一次的可用条目，也不要让右键菜单突然消失（用户会以为功能坏了）。
+    let mut peers = discover_peers();
+    // 设备和手机公告周期不同、还会被对端限速，单轮只回一个很常见，多轮取并集
+    for _ in 0..3 {
+        if peers.len() >= 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        merge_peers(&mut peers, discover_peers());
+    }
+    menu_debug(&format!(
+        "install_shell_menu peers={} exe={}",
+        peers.len(),
+        exe.display()
+    ));
+    if peers.is_empty() {
+        menu_debug("peers empty, keep existing menu untouched");
+        return;
+    }
+    for p in &peers {
+        menu_debug(&format!("peer addr={} fp={} name={}", p.addr, p.fp, p.name));
+    }
     for i in 0..4 {
         for r in roots {
             let key = format!("{r}\\TongchuanMenu_{i}");
