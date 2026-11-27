@@ -1,22 +1,274 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! 通传 Windows 桌面壳（v1.4.1，Tauri 2）
+//! 通传 Windows 桌面壳（v1.4.2，Tauri 2）
 //!
 //! 形态：一个正经的 Windows 应用 —— 原生托盘 + 管理页窗口，后台拉起 `tc.exe daemon`。
 //! 关窗只是隐藏到托盘，托盘菜单可「打开管理页 / 重启接收 / 退出」。
 //! v1.4.1 新增：只允许一个实例；收到文件时右下角浮出提示（点一下打开落点目录）；
 //! 支持把文件/文件夹拖进窗口排队发送；修托盘右键菜单一闪就没。
+//! v1.4.2 新增：右键菜单由桌面端自己维护（按发现到的设备重写注册表，带应用图标），
+//! 命令行 `--send-to` 承接右键调用（GUI 子系统，不会闪黑窗）；管理页支持回车登录。
 
+use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[link(name = "user32")]
+extern "system" {
+    fn MessageBoxW(hwnd: *mut c_void, text: *const u16, caption: *const u16, utype: u32) -> i32;
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 右键发送失败时给一句人话；成功就静默退出（免得每次右键都弹框）。
+fn message_box(text: &str, title: &str, icon: u32) {
+    let t = wide(&text.replace('\n', "\r\n"));
+    let c = wide(title);
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), t.as_ptr(), c.as_ptr(), icon);
+    }
+}
+
+fn data_dir() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .map(|p| PathBuf::from(p).join("com.tongchuan.desktop"))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// 桌面端旁边的 `bin\tc.exe`：安装目录、绿色版目录都是这个相对位置。
+fn companion_tc() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.join("bin").join("tc.exe")))
+        .unwrap_or_else(|| PathBuf::from("bin").join("tc.exe"))
+}
+
+fn reg(args: &[&str]) -> bool {
+    Command::new("reg.exe")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn reg_add(key: &str, name: Option<&str>, value: &str) {
+    match name {
+        Some(n) => {
+            reg(&["add", key, "/v", n, "/d", value, "/f"]);
+        }
+        None => {
+            reg(&["add", key, "/ve", "/d", value, "/f"]);
+        }
+    }
+}
+
+fn reg_del(key: &str) {
+    reg(&["delete", key, "/f"]);
+}
+
+struct Peer {
+    addr: String,
+    fp: String,
+    name: String,
+}
+
+/// 同网段在线的设备。右键菜单要的是「能用的目标」，所以只取这次真的应答了的。
+fn own_fingerprint() -> Option<String> {
+    let out = Command::new(companion_tc())
+        .arg("identity")
+        .arg("--dir")
+        .arg(data_dir().join("identity"))
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace()
+        .find_map(|kv| kv.strip_prefix("fingerprint=").map(|s| s.to_string()))
+}
+
+fn discover_peers() -> Vec<Peer> {
+    let out = match Command::new(companion_tc())
+        .args(["discover", "--timeout", "2"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let own = own_fingerprint();
+    let mut peers: Vec<Peer> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with("PEER ") {
+            continue;
+        }
+        let mut addr = String::new();
+        let mut fp = String::new();
+        let mut name = String::new();
+        for kv in line.split_whitespace() {
+            if let Some((k, v)) = kv.split_once('=') {
+                match k {
+                    "addr" => addr = v.to_string(),
+                    "fp" => fp = v.to_string(),
+                    "name" => name = v.to_string(),
+                    _ => {}
+                }
+            }
+        }
+        // 回环是本机自己（桌面端和 daemon 在同一台机器），放菜单上没意义；
+        // 指纹跟本机一样的也是自己（Radmin 之类的虚拟网卡会把它换个 IP 再报一遍）。
+        if addr.is_empty() || fp.is_empty() || addr.starts_with("127.") {
+            continue;
+        }
+        if own.as_deref() == Some(fp.as_str()) {
+            continue;
+        }
+        if let Some(same) = peers.iter_mut().find(|p| p.fp == fp) {
+            // 同一台设备报了两个地址时留局域网那个（192.168.*），VPN 地址只当兜底
+            if !same.addr.starts_with("192.168.") && addr.starts_with("192.168.") {
+                same.addr = addr;
+            }
+            continue;
+        }
+        peers.push(Peer {
+            addr,
+            name: if name.is_empty() {
+                "未知设备".to_string()
+            } else {
+                name
+            },
+            fp,
+        });
+    }
+    // 局域网地址排前面（VPN 虚拟网卡那种 26.x 地址排后面），最多放 3 个，菜单不至于太长
+    peers.sort_by_key(|p| if p.addr.starts_with("192.168.") { 0 } else { 1 });
+    peers.truncate(3);
+    peers
+}
+
+/// 重写右键菜单：`*\shell`（文件）、`Directory\shell`（文件夹）、`Folder\shell`。
+/// 只认这三处的扁平项，不再用级联子菜单——级联要 SubCommands + 动态 shell 键，
+/// Explorer 缓存一乱就变成空白项（v1.4.1 之前那套就是这么坏的）。
+fn install_shell_menu() {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let ico = exe
+        .parent()
+        .map(|p| p.join("tongchuan.ico"))
+        .filter(|p| p.exists());
+    // 没有独立 ico 就用外壳自己的图标（exe 里嵌了同一枚），菜单项前面照样是通传的图标
+    let icon_value = match &ico {
+        Some(p) => p.display().to_string(),
+        None => format!("{},0", exe.display()),
+    };
+    let roots = [
+        "HKCU\\Software\\Classes\\*\\shell",
+        "HKCU\\Software\\Classes\\Directory\\shell",
+        "HKCU\\Software\\Classes\\Folder\\shell",
+    ];
+
+    // 旧版留下的入口全部清掉：级联项永远显示「（未发现设备）」，
+    // 两个按设备写死的项指向根本不存在的 scripts\send-hidden.vbs 和错位的 tc.exe。
+    for legacy in [
+        "TongchuanSend",
+        "TongchuanSendNAS",
+        "TongchuanSendPhone",
+        "TongchuanResendLast",
+    ] {
+        for r in roots {
+            reg_del(&format!("{r}\\{legacy}"));
+        }
+    }
+
+    let peers = discover_peers();
+    for i in 0..4 {
+        for r in roots {
+            let key = format!("{r}\\TongchuanMenu_{i}");
+            if i >= peers.len() {
+                reg_del(&key);
+                continue;
+            }
+            let p = &peers[i];
+            let label = format!("用通传发送到 {}", p.name);
+            reg_add(&key, None, &label);
+            reg_add(&key, Some("MUIVerb"), &label);
+            reg_add(&key, Some("Icon"), &icon_value);
+            // Player：Explorer 会把选中的多个路径追加到命令行末尾，多选也就一次发完
+            reg_add(&key, Some("MultiSelectModel"), "Player");
+            let cmdline = format!("\"{}\" --send-to {} {}", exe.display(), p.addr, p.fp);
+            reg_add(&format!("{key}\\command"), None, &cmdline);
+        }
+    }
+}
+
+/// 右键菜单调进来的发送：不建窗口、不占单实例锁，发完就退。
+fn run_send_to(addr: &str, fp: &str, paths: &[String]) -> i32 {
+    let mut cmd = Command::new(companion_tc());
+    cmd.arg("send")
+        .arg("--to")
+        .arg(addr)
+        .arg("--peer-fp")
+        .arg(fp)
+        .arg("--identity")
+        .arg(data_dir().join("identity"))
+        .creation_flags(CREATE_NO_WINDOW);
+    for p in paths {
+        cmd.arg("--dir").arg(p);
+    }
+    match cmd.output() {
+        Ok(o) if o.status.success() => 0,
+        Ok(o) => {
+            let mut msg = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            if msg.is_empty() {
+                msg = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            }
+            if msg.is_empty() {
+                msg = format!("退出码 {}", o.status.code().unwrap_or(-1));
+            }
+            message_box(&format!("发送失败：\n{}", friendly_send_error(&msg)), "通传", 0x10);
+            1
+        }
+        Err(e) => {
+            message_box(&format!("调用 tc.exe 失败：{e}"), "通传", 0x10);
+            1
+        }
+    }
+}
+
+/// 把 tc.exe 的英文错误翻成用户能照做的话；认不出来的原样透出，别丢掉诊断信息。
+fn friendly_send_error(raw: &str) -> String {
+    let low = raw.to_ascii_lowercase();
+    let hint = if low.contains("untrusted") {
+        "对方还没信任这台电脑。到对方的管理页把本机批准为信任设备，或让对方把「信任模式」改成 open 后再试。"
+    } else if low.contains("64 hex") || low.contains("fingerprint must") {
+        "设备信息过期了（对方可能换了端口）。右键托盘图标选「刷新右键菜单」，然后重新发送。"
+    } else if low.contains("failed to fill whole buffer") || low.contains("没有应答") {
+        "对方没有应答：设备可能已离线，或者对方只接受加密连接（先 tc discover 确认指纹）。"
+    } else if low.contains("connection refused") || low.contains("actively refused") {
+        "连不上对方：设备离线，或端口变了。刷新右键菜单后再试。"
+    } else if low.contains("no such file") || low.contains("not found") {
+        "选中的文件/文件夹找不到了，可能已被移动或删除。"
+    } else {
+        return raw.to_string();
+    };
+    format!("{hint}\n\n（原始信息：{raw}）")
+}
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -339,6 +591,28 @@ fn open_toast(app: tauri::AppHandle, state: tauri::State<ToastState>) -> Result<
 }
 
 fn main() {
+    // 右键菜单与命令行入口：这些分支必须在建 Tauri 之前处理，
+    // 否则右键一次就会起一个窗口 + 一个 daemon，还抢单实例锁。
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(pos) = argv.iter().position(|a| a == "--send-to") {
+        if argv.len() >= pos + 3 {
+            let addr = argv[pos + 1].clone();
+            let fp = argv[pos + 2].clone();
+            let paths: Vec<String> = argv[pos + 3..].to_vec();
+            if paths.is_empty() {
+                message_box("没有选中要发送的文件。", "通传", 0x30);
+                std::process::exit(2);
+            }
+            std::process::exit(run_send_to(&addr, &fp, &paths));
+        }
+        message_box("参数不完整：--send-to <地址> <指纹> <路径...>", "通传", 0x10);
+        std::process::exit(2);
+    }
+    if argv.iter().any(|a| a == "--refresh-menu") {
+        install_shell_menu();
+        return;
+    }
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![toast_info, open_toast])
         .setup(|app| {
@@ -385,14 +659,19 @@ fn main() {
 
             watch_received(handle.clone(), data.join("logs").join("history.jsonl"));
 
+            // 右键菜单交给后台线程：discover 要等 2 秒，别拖慢开窗
+            std::thread::spawn(install_shell_menu);
+
             // 给 daemon 一点启动时间再开窗，避免白屏
             std::thread::sleep(Duration::from_millis(1200));
             open_ui(&handle);
 
             let open = MenuItem::with_id(app, "open", "打开管理页", true, None::<&str>)?;
             let restart = MenuItem::with_id(app, "restart", "重启接收", true, None::<&str>)?;
+            let menu_refresh =
+                MenuItem::with_id(app, "menu", "刷新右键菜单", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出（停止接收）", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &restart, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &restart, &menu_refresh, &quit])?;
 
             let icon = app
                 .default_window_icon()
@@ -413,6 +692,10 @@ fn main() {
                         if let Err(e) = start_daemon(app, &d) {
                             report_start_error(app, &e);
                         }
+                    }
+                    "menu" => {
+                        // 换了网络/对方改了地址后点一下就能重建菜单，不用重启应用
+                        std::thread::spawn(install_shell_menu);
                     }
                     "quit" => {
                         stop_daemon(&app.state::<Daemon>());

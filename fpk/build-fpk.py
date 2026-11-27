@@ -195,7 +195,7 @@ MANIFEST = (
     "platform        = x86\n"
     "os_min_version  = 1.2.1200\n"
     "checkport       = true\n"
-    "changelog       = v{ver}：安全默认开启（信任校验默认 closed，陌生设备需配对/批准，满足上架「不可免鉴权」要求）；安装向导可选安全/宽松模式；默认落点改共享目录子目录。\n"
+    "changelog       = v{ver}：Windows 右键菜单重做（按发现设备自动生成、带应用图标、支持多选）、管理页回车即登录；安卓收完自动刷新与默认应用打开更稳；NAS 侧继续沿用安全默认（陌生设备需配对，不可免鉴权写入）。\n"
     "install_type    = \n"
     "checksum        = {md5}\n"
 )
