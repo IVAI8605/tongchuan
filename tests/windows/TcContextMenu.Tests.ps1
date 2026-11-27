@@ -33,9 +33,10 @@ foreach ($s in $shells) {
         if ($label -is [array]) { $label = $label[0] }
         if ($label -notlike '用通传发送到*') { throw "$s/$($item.PSChildName) 菜单文字不对：$label" }
         if (-not $props.Icon) { throw "$s/$($item.PSChildName) 没有设置图标" }
-        if ($props.MultiSelectModel -ne 'Player') { throw "$s/$($item.PSChildName) 没开多选（MultiSelectModel=$($props.MultiSelectModel)）" }
         $cmd = (Get-ItemProperty -LiteralPath (Join-Path $item.PSPath 'command') -ErrorAction SilentlyContinue).'(default)'
         if (-not $cmd) { throw "$s/$($item.PSChildName) 缺少 command" }
+        # 传统动词只有带 %1 时资源管理器才会把选中的文件传进来，漏了它就会「没有选中要发送的文件」
+        if ($cmd -notmatch '%1') { throw "$s/$($item.PSChildName) 命令里缺少 %1 占位符：$cmd" }
         if ($cmd -notmatch '--send-to') { throw "$s/$($item.PSChildName) 命令里没有 --send-to：$cmd" }
         if ($cmd -notmatch [regex]::Escape($exe)) { throw "$s/$($item.PSChildName) 命令没指向当前桌面端：$cmd" }
         Write-Output "PASS $s/$($item.PSChildName)  $label"

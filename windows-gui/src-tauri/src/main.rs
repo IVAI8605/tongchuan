@@ -253,9 +253,18 @@ fn install_shell_menu() {
             reg_add(&key, None, &label);
             reg_add(&key, Some("MUIVerb"), &label);
             reg_add(&key, Some("Icon"), &icon_value);
-            // Player：Explorer 会把选中的多个路径追加到命令行末尾，多选也就一次发完
-            reg_add(&key, Some("MultiSelectModel"), "Player");
-            let cmdline = format!("\"{}\" --send-to {} {}", exe.display(), p.addr, p.fp);
+            // 不用 MultiSelectModel=Player：传统动词只认 %1，玩家模型下一个进程
+            // 拿不到完整选择（实测不带占位符时一个路径都不给）。保持默认 Document
+            // 语义——多选时资源管理器会按每个文件各起一次，每次都带自己的 %1，
+            // 文件一个都不丢；文件夹整体右键则是一次发整包。
+            // Explorer 的静态动词只有在命令行里出现 %1 这类占位符时才会把选中项传进来；
+            // 不带占位符时一个路径都不会给（实测 argv 只有 --send-to/地址/指纹）。
+            let cmdline = format!(
+                "\"{}\" --send-to {} {} \"%1\"",
+                exe.display(),
+                p.addr,
+                p.fp
+            );
             reg_add(&format!("{key}\\command"), None, &cmdline);
         }
     }
@@ -644,7 +653,7 @@ fn main() {
             let fp = argv[pos + 2].clone();
             let paths: Vec<String> = argv[pos + 3..].to_vec();
             if paths.is_empty() {
-                message_box("没有选中要发送的文件。", "通传", 0x30);
+                message_box("没有拿到要发送的文件：请在资源管理器里先选中文件（或文件夹），再右键点「用通传发送到 …」。", "通传", 0x30);
                 std::process::exit(2);
             }
             std::process::exit(run_send_to(&addr, &fp, &paths));
