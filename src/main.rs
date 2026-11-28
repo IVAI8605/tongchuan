@@ -351,16 +351,97 @@ fn port_of(addr: &str) -> u16 {
     addr.rsplit(':').next().and_then(|s| s.parse().ok()).unwrap_or(53318)
 }
 
+/// `tc send --to 192.168.95.100` 也要能用：用户从 `tc discover` 复制主机名、或手打 NAS 地址时
+/// 常常不带端口，旧实现会直接抛 `invalid socket address`。这里补默认端口。
+fn normalize_to(to: &str) -> String {
+    let t = to.trim();
+    if t.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()).is_some() {
+        t.to_string()
+    } else {
+        format!("{}:{}", t.trim_end_matches(':'), discover::DISCOVERY_PORT)
+    }
+}
+
 /// 没给 --peer-fp 时听一轮发现报文，取同一地址的公告指纹。
 /// 为什么需要：接收端带身份后强制 TLS，明文连接会被直接掐断，客户端只看到
 /// "failed to fill whole buffer"，用户拿到的信息等于没信息（2026-11-13 发版冒烟实测）。
 /// 听不到就返回 None，仍走明文老路径（对端是 `tc recv` 明文接收时还能用）。
+/// 公告间隔 5 秒（`announce_forever(ann, 5s)`），只听 2 秒必然时灵时不灵——
+/// 这就是「同一条命令有时成功、有时报 failed to fill whole buffer」的根因。
+/// 改成 6 秒，保证至少覆盖一轮公告。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// 同一台设备可能同时从局域网、虚拟网卡、回环被听到（不同 addr、同一指纹）。
+/// 输出前按指纹合并，并优先保留真实局域网地址，避免 `tc discover` 列出重复设备。
+fn peer_score(addr: &str) -> u8 {
+    let host = endpoint_host(addr);
+    if host.starts_with("192.168.") {
+        0
+    } else if host.starts_with("10.") {
+        1
+    } else if host.starts_with("172.") {
+        2
+    } else if host == "127.0.0.1" || host == "::1" {
+        3
+    } else {
+        4
+    }
+}
+
+fn dedupe_peers(peers: Vec<discover::Peer>) -> Vec<discover::Peer> {
+    let mut out: Vec<discover::Peer> = Vec::new();
+    for p in peers {
+        match out.iter_mut().find(|q| q.fingerprint == p.fingerprint) {
+            Some(q) => {
+                if peer_score(&p.addr) < peer_score(&q.addr) {
+                    q.addr = p.addr.clone();
+                    q.name = p.name.clone();
+                }
+            }
+            None => out.push(p),
+        }
+    }
+    out
+}
+
+/// 一次探测的结果：用来区分「没听到任何设备」和「听到了但没有这个地址」，
+/// 两种情况该给用户的提示完全不同。
+struct PeerProbe {
+    matched: Option<(String, String)>,
+    heard: usize,
+    suggestion: String,
+}
+
+fn probe_peer_for(to: &str) -> PeerProbe {
+    let peers = discover::listen(PROBE_TIMEOUT, "").unwrap_or_default();
+    let heard = peers.len();
+    // 先按完整地址匹配；只有用户没写端口（按默认 53318 处理）时才放宽到主机名，
+    // 否则「127.0.0.1:59999」会被 127.0.0.1:54418 的公告冒名顶替，连接必然失败还看不出原因。
+    let exact = peers.iter().find(|p| p.addr == to);
+    let matched = exact
+        .or_else(|| {
+            if port_of(to) == discover::DISCOVERY_PORT {
+                peers.iter().find(|p| endpoint_host(&p.addr) == endpoint_host(to))
+            } else {
+                None
+            }
+        })
+        .map(|p| (p.fingerprint.clone(), p.name.clone()));
+    let suggestion = dedupe_peers(peers)
+        .iter()
+        .take(3)
+        .map(|p| format!("{}@{}", p.name, p.addr))
+        .collect::<Vec<_>>()
+        .join("；");
+    PeerProbe {
+        matched,
+        heard,
+        suggestion,
+    }
+}
+
 fn discover_fp_for(to: &str) -> Option<(String, String)> {
-    let peers = discover::listen(Duration::from_secs(2), "").ok()?;
-    peers
-        .into_iter()
-        .find(|p| p.addr == to || endpoint_host(&p.addr) == endpoint_host(to))
-        .map(|p| (p.fingerprint, p.name))
+    probe_peer_for(to).matched
 }
 
 /// 只比主机部分：对端公告用的端口与用户手填的端口可能不一致（同一台机器的不同入口）。
@@ -796,16 +877,21 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
             Ok(())
         }
         "send" => {
-            let to = value(args, "--to")?;
+            let to = normalize_to(&value(args, "--to")?);
             let dirs = values(args, "--dir");
             if dirs.is_empty() {
                 return Err(usage_err("send needs at least one --dir"));
             }
             let paths: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
             // 没给指纹先听一轮公告：接收端强制 TLS 时，明文连接只会得到一句 EOF 报错
+            let probe = if opt(args, "--peer-fp").is_some() {
+                None
+            } else {
+                Some(probe_peer_for(&to))
+            };
             let peer_fp = match opt(args, "--peer-fp") {
                 Some(f) => Some(f),
-                None => match discover_fp_for(&to) {
+                None => match probe.as_ref().and_then(|p| p.matched.clone()) {
                     Some((fp, name)) => {
                         // 明确告诉用户用的是哪个指纹，避免「悄悄换了连接方式」的观感
                         let short: String = fp.chars().take(16).collect();
@@ -840,11 +926,22 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
             ) {
                 Ok(r) => print_send(&r, args),
                 Err(e) => {
-                    // 对端只接受 TLS 时，明文连接会被掐断，这里只体现为 EOF；给一句能执行的话
-                    if e.kind() == io::ErrorKind::UnexpectedEof && peer_fp.is_none() {
-                        eprintln!(
-                            "提示: 对端没有应答，可能只接受 TLS。先跑 tc discover 查对端指纹，再加 --peer-fp 重试"
-                        );
+                    // 没给指纹时，任何失败都先给一句能照着做的排查提示（EOF、连接被拒都算）
+                    if peer_fp.is_none() {
+                        match probe.as_ref() {
+                            Some(p) if p.heard == 0 => eprintln!(
+                                "提示: {} 秒内没听到任何设备公告。确认对端已启动、与你在同一网段（UDP {}），或直接加 --peer-fp 指定指纹",
+                                PROBE_TIMEOUT.as_secs(),
+                                discover::DISCOVERY_PORT
+                            ),
+                            Some(p) => eprintln!(
+                                "提示: 听得到设备，但没有地址为 {to} 的（听到的: {}）。用 tc discover 看实际地址，或加 --peer-fp 指定指纹",
+                                if p.suggestion.is_empty() { "无".to_string() } else { p.suggestion.clone() }
+                            ),
+                            None => eprintln!(
+                                "提示: 对端没有应答，可能只接受 TLS。先跑 tc discover 查对端指纹，再加 --peer-fp 重试"
+                            ),
+                        }
                     }
                     if let Some(q) = queue_dir {
                         // 队列表示「这次没发出去、稍后补发」，历史里那条 ERROR 记录如实反映直接发送失败
@@ -879,7 +976,7 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
         }
         "dests" => {
             // v0.16：只查对端可选落点，不传文件。握手与正式发送一致，因此同样受信任门禁约束。
-            let to = value(args, "--to")?;
+            let to = normalize_to(&value(args, "--to")?);
             let peer_fp = match opt(args, "--peer-fp") {
                 Some(f) => Some(f),
                 None => discover_fp_for(&to).map(|(fp, _)| fp),
@@ -1493,7 +1590,7 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
                 Some(d) => Identity::load_or_create(Path::new(&d))?.fingerprint_hex(),
                 None => String::new(),
             };
-            let peers = discover::listen(Duration::from_secs(timeout), &self_fp)?;
+            let peers = dedupe_peers(discover::listen(Duration::from_secs(timeout), &self_fp)?);
             if json_mode(args) {
                 emit_json(
                     Event::new("DISCOVER").field("count", FieldValue::Num(peers.len() as u64)),
@@ -1646,7 +1743,18 @@ fn run(args: &[String]) -> Result<(), cli::error::CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::endpoint_host;
+    use super::{dedupe_peers, endpoint_host, normalize_to, port_of};
+    use tc_core::discover::Peer;
+
+    fn peer(addr: &str, fp: &str) -> Peer {
+        Peer {
+            addr: addr.into(),
+            fingerprint: fp.into(),
+            name: "n".into(),
+            platform: "windows".into(),
+            reply: false,
+        }
+    }
 
     /// 发现报文里的地址与用户手填的地址可能只有端口不同，比对时只看主机部分。
     #[test]
@@ -1655,5 +1763,31 @@ mod tests {
         assert_eq!(endpoint_host("203.0.113.10"), "203.0.113.10");
         // IPv6 方括号形式：取最后一个冒号之前，方括号保留原样
         assert_eq!(endpoint_host("[::1]:53318"), "[::1]");
+    }
+
+    /// 不带端口时补默认端口，否则底层会报 invalid socket address。
+    #[test]
+    fn normalize_to_adds_default_port() {
+        assert_eq!(normalize_to("192.168.95.100"), "192.168.95.100:53318");
+        assert_eq!(normalize_to("192.168.95.100:54418"), "192.168.95.100:54418");
+        assert_eq!(normalize_to(" 192.168.95.100 "), "192.168.95.100:53318");
+        // 端口不是数字时按缺端口处理，不能当成合法端口放过
+        assert_eq!(normalize_to("192.168.95.100:abc"), "192.168.95.100:abc:53318");
+        assert_eq!(port_of("192.168.95.100"), 53318);
+    }
+
+    /// 同一指纹的多个地址只留一条，并优先真实局域网地址。
+    #[test]
+    fn dedupe_peers_keeps_one_row_per_fingerprint() {
+        let out = dedupe_peers(vec![
+            peer("26.41.175.173:54418", "fpA"),
+            peer("127.0.0.1:54418", "fpA"),
+            peer("192.168.1.10:53318", "fpA"),
+            peer("192.168.95.100:53318", "fpB"),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].fingerprint, "fpA");
+        assert_eq!(out[0].addr, "192.168.1.10:53318");
+        assert_eq!(out[1].addr, "192.168.95.100:53318");
     }
 }
