@@ -4,7 +4,7 @@
 
 通传是一个**点对点**的文件传输工具，把整个目录（保留相对路径与空目录）直接传到另一台设备，全程走 TLS 1.3 加密。提供命令行 `tc`、Android 应用、Windows 桌面端（Tauri 2）以及面向 NAS 的飞牛 fnOS 应用包。
 
-当前版本 **1.4.2**（右键发送菜单重做 + 管理页回车登录 + 分发/商店适配；Windows / Android / fpk 三端同号重编），传输协议 **0.20**（与包版本解耦，`0.20.x` 各端互通）。
+当前版本 **1.4.3**（全功能验收修复：发现去重 + 自动找指纹 + 缺省端口与提示；Windows / Android / fpk 三端同号重编），传输协议 **0.20**（与包版本解耦，`0.20.x` 各端互通）。
 
 ## 下载
 
@@ -12,10 +12,10 @@
 
 | 端 | 文件 | 说明 |
 | --- | --- | --- |
-| Windows | `tongchuan-1.4.2-win-setup.exe` | NSIS 安装包，装完含桌面端与 `bin\tc.exe`；**未做代码签名**，首次运行 SmartScreen 会拦，点「更多信息 → 仍要运行」；静默安装加 `/S` |
-| Windows（免安装） | `tongchuan-desktop-1.4.2.exe` | 单文件桌面端，需自备 `tc.exe` |
-| Android | `tongchuan-1.4.2-android.apk` | 只支持 arm64（armv7/x86 未出包）；正式签名（证书 CN=Tongchuan），同一签名才可覆盖升级；首次安装需在系统里允许「安装未知来源应用」 |
-| 飞牛 fnOS | `tongchuan-1.4.2-linux-x64.fpk` | 在 App Center「手动安装」上传；安装向导可选接收子目录与信任模式（默认安全模式，陌生设备需在管理页批准） |
+| Windows | `tongchuan-1.4.3-win-setup.exe` | NSIS 安装包，装完含桌面端与 `bin\tc.exe`；**未做代码签名**，首次运行 SmartScreen 会拦，点「更多信息 → 仍要运行」；静默安装加 `/S` |
+| Windows（免安装） | `tongchuan-desktop-1.4.3.exe` | 单文件桌面端，需自备 `tc.exe` |
+| Android | `tongchuan-1.4.3-android.apk` | 只支持 arm64（armv7/x86 未出包）；正式签名（证书 CN=Tongchuan），同一签名才可覆盖升级；首次安装需在系统里允许「安装未知来源应用」 |
+| 飞牛 fnOS | `tongchuan-1.4.3-linux-x64.fpk` | 在 App Center「手动安装」上传；安装向导可选接收子目录与信任模式（默认安全模式，陌生设备需在管理页批准） |
 
 ## 特性
 
@@ -104,5 +104,6 @@ cargo build --release -p tongchuan   # 产物：tc（Windows 为 tc.exe）
 ## 许可
 
 [MIT](./LICENSE) © IVAI8605。可自由使用、修改与再分发，保留版权与许可声明即可；软件按「原样」提供，不附带担保。
+
 
 
