@@ -1623,9 +1623,20 @@ public class TcController {
     /** 顶部状态行：运行状态 + 端口 + 保活 + 权限。 */
     private void refresh() {
         StringBuilder sb = new StringBuilder();
-        boolean running = ReceiverService.isRunning();
-        sb.append(running ? "常驻：运行中" : "常驻：未启动");
+        boolean svcRunning = ReceiverService.isRunning();
+        boolean ready = ReceiverService.isReceiverReady();
         String err = ReceiverService.lastError();
+        // 服务活着不等于端口在听：旧版只看服务存活，端口被占用时会显示「运行中」，
+        // 实际对方根本连不上、发现列表里也没有这台手机（2026-11-28 真机复现）。
+        if (ready) {
+            sb.append("常驻：运行中");
+        } else if (svcRunning && err != null && !err.isEmpty()) {
+            sb.append("常驻：启动失败");
+        } else if (svcRunning) {
+            sb.append("常驻：正在启动…");
+        } else {
+            sb.append("常驻：未启动");
+        }
         if (err != null && !err.isEmpty()) {
             sb.append("\n").append(err);
         }
@@ -1633,8 +1644,8 @@ public class TcController {
         sb.append("\n保活增强：").append(KeepAliveService.isEnabled(activity) ? "已开启" : "未开启");
         sb.append("\n所有文件访问：").append(Dest.hasAllFilesAccess() ? "已授权" : "未授权（只能存应用私有目录）");
         ui.setStatusText(sb.toString());
-        ui.setStatusOk(running);
-        ui.setRecvRunning(running);
+        ui.setStatusOk(ready);
+        ui.setRecvRunning(svcRunning);
         ui.setRecvPending(recvPending);
         ui.setKeepAliveEnabled(KeepAliveService.isEnabled(activity));
         ui.setHasAllFilesAccess(Dest.hasAllFilesAccess());
@@ -1718,6 +1729,12 @@ public class TcController {
             ReceiverService.start(activity);
             uiTick.postDelayed(this::refresh, 800);
             uiTick.postDelayed(this::refresh, 2500);
+        } else if (!ReceiverService.isReceiverReady()) {
+            // 服务在、端口没听（上次 bind 失败留下的半死状态）：重开一次，
+            // 不能因为「服务已存在」就跳过，否则列表里永远看不到这台手机。
+            ReceiverService.restart(activity);
+            uiTick.postDelayed(this::refresh, 800);
+            uiTick.postDelayed(this::refresh, 2500);
         }
         android.content.SharedPreferences p =
                 activity.getSharedPreferences(Dest.PREFS, Activity.MODE_PRIVATE);
@@ -1755,10 +1772,13 @@ public class TcController {
      * 之前点完只刷新一次，服务还没起来就显示「未启动」，看起来像按钮没生效。
      */
     private void waitRecvState(boolean want) {
-        final long deadline = System.currentTimeMillis() + 5000;
+        // 启动要在端口重试窗口（最多 6 次 × 2s）内等，否则还在重试就先报「没等到」
+        final long deadline = System.currentTimeMillis() + (want ? 14000 : 5000);
         final Runnable[] tick = new Runnable[1];
         tick[0] = () -> {
-            if (ReceiverService.isRunning() == want) {
+            boolean stateOk = want ? ReceiverService.isReceiverReady()
+                    : !ReceiverService.isRunning();
+            if (stateOk) {
                 recvPending = false;
                 ui.setRecvPending(false);
                 refresh();
@@ -1769,7 +1789,7 @@ public class TcController {
                 recvPending = false;
                 ui.setRecvPending(false);
                 refresh();
-                toast("5 秒内没等到状态变化；点「刷新状态」再看，失败原因见上方提示");
+                toast("没等到接收端就绪；失败原因见上方提示，可点「停止常驻接收」再重新启动");
                 return;
             }
             uiTick.postDelayed(tick[0], 300);

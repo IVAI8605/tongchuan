@@ -11,7 +11,9 @@ import android.content.Intent;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 
@@ -40,14 +42,25 @@ public class ReceiverService extends Service {
 
     private static volatile ReceiverService alive;
     private static volatile String lastError = "";
+    /** 原生接收端是否真的绑定成功。服务活着 ≠ 端口在听——UI 必须按这个判断。 */
+    private static volatile boolean ready = false;
 
     private long handle = -1;
+    /** 端口被占用等瞬时失败时按退避重试；不重试就只能等用户手动杀进程 */
+    private final Handler retryHandler = new Handler(Looper.getMainLooper());
+    private int retryAttempt = 0;
+    private static final int RETRY_MAX = 6;
     /** 常驻期间持有的两把保活锁；见 acquireKeepAliveLocks 里的取舍说明 */
     private WifiManager.WifiLock wifiLock;
     private PowerManager.WakeLock cpuLock;
 
     public static boolean isRunning() {
         return alive != null;
+    }
+
+    /** 服务进程在跑，且原生接收端已成功监听 53318。 */
+    public static boolean isReceiverReady() {
+        return alive != null && ready;
     }
 
     public static String lastError() {
@@ -163,6 +176,9 @@ public class ReceiverService extends Service {
 
     /** 起（或重起）原生接收端，配置每次重新拼，保证落点改动立即生效。 */
     private void launchReceiver() {
+        retryHandler.removeCallbacksAndMessages(null);
+        retryAttempt = 0;
+        ready = false;
         if (handle >= 0) {
             TcNative.stopReceiver(handle);
             handle = -1;
@@ -170,16 +186,52 @@ public class ReceiverService extends Service {
         handle = TcNative.startReceiver(buildConfig().toString());
         if (handle < 0) {
             lastError = "启动失败：配置非法或端口 53318 被占用";
-            Log.e(TAG, lastError);
+            Log.e(TAG, lastError + "（第 " + (retryAttempt + 1) + " 次）");
             updateNotification(lastError);
+            scheduleRetry();
         } else {
             lastError = "";
+            retryAttempt = 0;
+            ready = true;
             updateNotification("正在等待接收");
         }
     }
 
+    /**
+     * 端口被上次残留的连接、或同进程另一个接收端短暂占住时，第一次 bind 会失败。
+     * 旧实现只试一次就把服务留在「活着但没在听」的状态，界面还显示「运行中」，
+     * 用户只能杀进程（2026-11-28 真机复现：手机在列表里消失、53318 连不上）。
+     * 这里按 2s 间隔最多试 6 次；仍失败就把错误留在界面上，不再假装正常。
+     */
+    private void scheduleRetry() {
+        if (retryAttempt >= RETRY_MAX) {
+            return;
+        }
+        retryAttempt++;
+        retryHandler.postDelayed(() -> {
+            if (alive == null) {
+                return;
+            }
+            // 只重试原生接收端，不动服务本身与保活锁
+            handle = TcNative.startReceiver(buildConfig().toString());
+            if (handle >= 0) {
+                lastError = "";
+                retryAttempt = 0;
+                ready = true;
+                updateNotification("正在等待接收");
+            } else if (retryAttempt < RETRY_MAX) {
+                scheduleRetry();
+            } else {
+                lastError = "启动失败：端口 53318 一直被占用，请关掉占用它的应用或重启手机";
+                updateNotification(lastError);
+            }
+        }, 2000);
+    }
+
     @Override
     public void onDestroy() {
+        ready = false;
+        retryHandler.removeCallbacksAndMessages(null);
         ScreenshotWatcher.stop();
         if (handle >= 0) {
             TcNative.stopReceiver(handle);
